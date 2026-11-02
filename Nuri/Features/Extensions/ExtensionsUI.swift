@@ -24,14 +24,15 @@ struct ExtensionsButton: View {
     }
 }
 
-/// A pinned extension in the bar: its icon in the bar's one color, like the symbols beside it, and
-/// its badge; a click does what its line in the panel does.
+/// A pinned extension in the bar: its icon (in its own colors, or in the bar's one color like the
+/// symbols beside it, as the Settings say) and its badge; a click does what its line in the panel does.
 @available(macOS 15.4, *)
 private struct PinnedExtensionButton: View {
     let record: InstalledExtension
     let context: WKWebExtensionContext
     @Environment(BrowserModel.self) private var browser
     @Environment(\.chromeForeground) private var foreground
+    @Environment(AppSettings.self) private var settings
     @State private var hovering = false
 
     var body: some View {
@@ -42,7 +43,11 @@ private struct PinnedExtensionButton: View {
         Button { host.performAction(record.id, in: browser) } label: {
             Group {
                 if let icon = host.icon(of: record.id, in: browser, size: 16) {
-                    Image(nsImage: icon.glyph(side: 15)).renderingMode(.template).foregroundStyle(foreground)
+                    if settings.monochromeExtensions {
+                        Image(nsImage: icon.glyph(side: 15)).renderingMode(.template).foregroundStyle(foreground)
+                    } else {
+                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 16, height: 16)
+                    }
                 } else {
                     Image(systemName: "puzzlepiece").font(.system(size: 13, weight: .medium)).foregroundStyle(foreground)
                 }
@@ -256,6 +261,9 @@ private struct ExtensionsSettings: View {
             }
             if !host.installed.isEmpty {
                 @Bindable var settings = AppSettings.shared
+                Toggle(L("Épinglées en monochrome", "Pinned in monochrome"), isOn: $settings.monochromeExtensions)
+                Note(L("Dans la barre, leurs icônes prennent la couleur des autres symboles au lieu de leurs propres couleurs.",
+                       "In the bar, their icons take the color of the other symbols instead of their own colors."))
                 Toggle(L("Mettre à jour automatiquement", "Update automatically"), isOn: $settings.extensionsAutoUpdate)
                 Note(L("Une fois par jour, Nuri demande au Chrome Web Store la version de chacune : seuls leurs identifiants sont envoyés.",
                        "Once a day, Nuri asks the Chrome Web Store for each one's version: only their identifiers are sent."))

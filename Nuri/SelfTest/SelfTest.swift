@@ -1343,6 +1343,11 @@ final class FeatureSelfTest {
                 host.setPinned(true, for: storeID)
                 await sleep(0.5)
                 await snapshot("store-epinglee-\(storeID.prefix(6))")
+                let monochrome = AppSettings.shared.monochromeExtensions
+                AppSettings.shared.monochromeExtensions.toggle()
+                await sleep(0.3)
+                await snapshot("store-epinglee-\(monochrome ? "couleur" : "mono")-\(storeID.prefix(6))")
+                AppSettings.shared.monochromeExtensions = monochrome
                 host.setPinned(false, for: storeID)
                 browser.close(shown)
             }

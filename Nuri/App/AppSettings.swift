@@ -82,6 +82,8 @@ final class AppSettings {
     var sleepInactiveTabs: Bool { didSet { defaults.set(sleepInactiveTabs, forKey: "sleepInactiveTabs") } }
     var autoPiP: Bool { didSet { defaults.set(autoPiP, forKey: "autoPiP") } }
     var extensionsAutoUpdate: Bool { didSet { defaults.set(extensionsAutoUpdate, forKey: "extensionsAutoUpdate") } }
+    /// Pinned extensions drawn in the bar's one color, like its symbols (off: their own colors).
+    var monochromeExtensions: Bool { didSet { defaults.set(monochromeExtensions, forKey: "monochromeExtensions") } }
     var autoMeetingPiP: Bool { didSet { defaults.set(autoMeetingPiP, forKey: "autoMeetingPiP") } }
     var blockAutoplayWithSound: Bool { didSet { defaults.set(blockAutoplayWithSound, forKey: "blockAutoplayWithSound") } }
     /// « Partager aussi le son » in the screen sharing question, as last answered.
@@ -119,6 +121,7 @@ final class AppSettings {
         sleepInactiveTabs = d.object(forKey: "sleepInactiveTabs") as? Bool ?? true
         autoPiP = d.object(forKey: "autoPiP") as? Bool ?? true
         extensionsAutoUpdate = d.object(forKey: "extensionsAutoUpdate") as? Bool ?? true
+        monochromeExtensions = d.bool(forKey: "monochromeExtensions")
         autoMeetingPiP = d.object(forKey: "autoMeetingPiP") as? Bool ?? true
         blockAutoplayWithSound = d.bool(forKey: "blockAutoplayWithSound")
         shareScreenAudio = d.bool(forKey: "shareScreenAudio")
