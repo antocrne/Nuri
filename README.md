@@ -43,7 +43,7 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 | Publicités et pisteurs | Bloqués avant chargement. Réglages → Confidentialité, ou le bouclier de la barre d'adresse pour un seul site. Les paramètres de suivi (`utm_*`, `fbclid`…) sont retirés des liens cliqués |
 | Fenêtre privée | ⌘⇧N. Stockage en mémoire, détruit à la fermeture ; rien dans l'historique |
 | Favoris et signets | L'étoile de la barre d'adresse ou ⌘D garde la page ; ⌥⌘B les montre. Un favori s'affiche aussi sur la page d'un nouvel onglet. Chaque espace a les siens, et la barre de commande les retrouve |
-| Vue partagée | ⌥⌘S, clic droit sur un onglet, ou glisser un onglet sur la moitié gauche ou droite de la page. Le séparateur se tire (double-clic : moitié-moitié). Pointeur en haut d'une page : une poignée pour échanger les côtés, et son × pour retirer la page |
+| Vue partagée | ⌥⌘S, clic droit sur un onglet, ou glisser un onglet sur la moitié gauche ou droite de la page. Le séparateur se tire (double-clic : moitié-moitié). Pointeur en haut d'une page : une poignée pour échanger les côtés, et son × pour retirer la page. Dans la barre, les deux onglets forment un seul bloc, qui se déplace d'un tenant |
 | Hublot (*Porthole*) | ⌥-clic sur un lien, ou son menu : un aperçu sans quitter la page. Échap le ferme ; il peut devenir un onglet ou passer en vue partagée |
 | Espaces | Le point de couleur de la barre. Onglets, connexions, cookies et historique séparés ; une couleur si on veut. ⌃⌘← ⌃⌘→ |
 | Son | Une enceinte sur l'onglet qui joue : clic pour couper, re-clic pour remettre. Aussi dans le menu de l'onglet, et ⌃M |
@@ -61,7 +61,7 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 | Mode lecture | ⌘⇧R : article et images (même chargées tardivement), sans JavaScript, taille du texte réglable |
 | Picture in Picture | ⌘⇧P, et automatique en quittant un onglet qui joue |
 | Réunion flottante | Pendant un appel, quitter l'onglet place la page entière dans une petite fenêtre au-dessus des apps, dézoomée à 75 % ; elle revient au retour, par son bouton, ou en raccrochant |
-| Son du partage d'écran | La question « Partager votre écran ? » propose « Partager aussi le son » : les autres apps et les autres onglets, jamais l'appel |
+| Partage d'écran | La question « Partager votre écran ? » propose une seule fenêtre ou l'écran entier, puis macOS laisse choisir laquelle. « Partager aussi le son » : les autres apps et les autres onglets, jamais l'appel |
 | Fermer | ⌥⌘W tous ; clic droit sur un onglet : tous sauf celui-ci. Les onglets des dossiers restent. ⌘⇧T rouvre |
 | Extensions | La pièce de puzzle de la barre. Depuis le Chrome Web Store (sur la page d'une extension, ou son adresse dans Réglages → Extensions), ou reprises du dossier de Chrome, Brave, Edge, Arc, Vivaldi. Il faut macOS 15.4. Jamais dans les fenêtres privées |
 | Téléchargements | Anneau de progression et vitesse dans la barre, panneau avec barre animée, pause et reprise, quarantaine Gatekeeper, noms nettoyés |
