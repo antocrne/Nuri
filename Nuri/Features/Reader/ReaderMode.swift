@@ -110,6 +110,8 @@ private struct ReaderWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
+        // Its images come from the site: through the VPN too.
+        ExtensionProxy.shared.attach(to: config.websiteDataStore)
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         // The article's images come from the page: its tracking pixels stay blocked here too.
         if let list = ContentRules.shared.installedAdBlockList { config.userContentController.add(list) }

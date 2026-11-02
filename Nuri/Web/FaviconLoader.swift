@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import os
 import WebKit
 
 /// Finds the page's icon (link rel=icon, else /favicon.ico) and stores a 32 px PNG on the tab.
@@ -7,15 +8,27 @@ import WebKit
 enum FaviconLoader {
     /// Shared by every space and private window: no cookies and no cache, which would let a site
     /// recognize the same user across them (an ephemeral session keeps both while Nuri runs).
-    nonisolated private static let session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpCookieStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieAcceptPolicy = .never
-        configuration.urlCache = nil
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: configuration)
-    }()
+    /// Made again when a VPN extension changes the route (ExtensionProxy): icons come from the
+    /// sites, and would tell them the real address.
+    nonisolated private static let sessions = OSAllocatedUnfairLock<(revision: Int, session: URLSession)?>(initialState: nil)
+
+    nonisolated private static var session: URLSession {
+        let routing = ExtensionProxy.routing.withLock { $0 }
+        return sessions.withLock { kept in
+            if let kept, kept.revision == routing.revision { return kept.session }
+            kept?.session.finishTasksAndInvalidate()
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.httpCookieStorage = nil
+            configuration.httpShouldSetCookies = false
+            configuration.httpCookieAcceptPolicy = .never
+            configuration.urlCache = nil
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            configuration.proxyConfigurations = routing.configurations
+            let made = URLSession(configuration: configuration)
+            kept = (routing.revision, made)
+            return made
+        }
+    }
     private static var cache: [String: (NSImage, Data)] = [:]
 
     static func load(for tab: Tab) {

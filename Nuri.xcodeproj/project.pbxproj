@@ -54,6 +54,7 @@
 		C6E1886A83A18BE5FFE418C9 /* Porthole.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17786CF0CBF8C16E7FACFB28 /* Porthole.swift */; };
 		CA5ECB2B41BCA0EDBAC61E6D /* TabStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB782D4D91E68D90B25812D8 /* TabStrip.swift */; };
 		CB83C473D5976DBD21DAB18A /* DownloadsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3888EF669E592D817000DC1D /* DownloadsPanel.swift */; };
+		D35651927E9321705768583A /* ExtensionProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BB532C3A967FD5721BB10F /* ExtensionProxy.swift */; };
 		D60D6B04CD0D4E886EE2941A /* Language.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CE6607216E87FF08D0BC98C /* Language.swift */; };
 		D933C505340E671584237486 /* PageArea.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9FBCFED4F691C8236F2D5BD /* PageArea.swift */; };
 		D9604B9E9BE7646F3081E532 /* SitePermissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BBB980C6089D778FD78292C /* SitePermissions.swift */; };
@@ -127,6 +128,7 @@
 		C7EFD36EE66F7FF446FE28D8 /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
 		C89F6FE9F22AAF5ACF883FFB /* Scripts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scripts.swift; sourceTree = "<group>"; };
 		CBF4C09A6C958620E7ACB79A /* HistoryWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryWindow.swift; sourceTree = "<group>"; };
+		D5BB532C3A967FD5721BB10F /* ExtensionProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionProxy.swift; sourceTree = "<group>"; };
 		D85657DB6E16BB1BB8491731 /* SystemAudioTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioTap.swift; sourceTree = "<group>"; };
 		D9FBCFED4F691C8236F2D5BD /* PageArea.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageArea.swift; sourceTree = "<group>"; };
 		DB61BBA6708667ED476F23C3 /* BrowserRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserRootView.swift; sourceTree = "<group>"; };
@@ -210,6 +212,7 @@
 				879CAA3928AA446D52F22A25 /* ExtensionFiles.swift */,
 				20F7BD8A06B1113BB7E0C40A /* ExtensionHost.swift */,
 				12D183CFCF6EA5EC8252C39B /* ExtensionPopup.swift */,
+				D5BB532C3A967FD5721BB10F /* ExtensionProxy.swift */,
 				C37398EDEC74342106A7958D /* Extensions.swift */,
 				C28B6EE3C4C8675E3223014B /* ExtensionsUI.swift */,
 			);
@@ -486,6 +489,7 @@
 				90B1D2B894AD1B4D1E0229D9 /* ExtensionFiles.swift in Sources */,
 				EEA9694005CC9BCDEBF5477D /* ExtensionHost.swift in Sources */,
 				69288A50D76F9BD6F40740EF /* ExtensionPopup.swift in Sources */,
+				D35651927E9321705768583A /* ExtensionProxy.swift in Sources */,
 				712D76D7FA8761DC2CC1EBD1 /* Extensions.swift in Sources */,
 				8FF6C97D3E05FC81937A271F /* ExtensionsUI.swift in Sources */,
 				6E208FAFB0119B1DFC89C57D /* ExternalURLPolicy.swift in Sources */,

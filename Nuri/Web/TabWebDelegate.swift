@@ -187,6 +187,11 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         if ns.domain == "WebKitErrorDomain" && (ns.code == 102 || ns.code == 204) { return }
         if tab?.recoverTypedAddress(from: ns) == true { return }
         tab?.loadError = ns.localizedDescription
+        // Through a VPN extension, its password may have expired: asked again, and the page with it.
+        if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorUserAuthenticationRequired, ExtensionProxy.shared.isRouting,
+           let tab, let url = ns.userInfo[NSURLErrorFailingURLErrorKey] as? URL ?? tab.url {
+            Task { if await ExtensionProxy.shared.renewAfterFailure(), tab.loadError != nil { tab.load(url) } }
+        }
     }
 
     // MARK: - HTTP authentication
@@ -203,6 +208,8 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         if space.authenticationMethod == NSURLAuthenticationMethodServerTrust, let trust = space.serverTrust {
             return await CertificateExceptions.decide(host: space.host, trust: trust, tab: tab)
         }
+        // A VPN extension's server: its password comes from the extension, never from a dialog.
+        if let answer = await ExtensionProxy.shared.answer(challenge) { return answer }
         // Refused three times: the server's own error page.
         guard Self.passwordMethods.contains(space.authenticationMethod), challenge.previousFailureCount < 3 else {
             return (.performDefaultHandling, nil)

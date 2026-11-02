@@ -248,6 +248,7 @@ private struct ExtensionsSettings: View {
     }
 
     private var host: ExtensionHost { ExtensionHost.shared }
+    private var proxy: ExtensionProxy { ExtensionProxy.shared }
     private var browser: BrowserModel { BrowserWindows.shared.normalTarget }
 
     var body: some View {
@@ -271,6 +272,24 @@ private struct ExtensionsSettings: View {
                     run { message = await host.checkForUpdates() }
                 }
                 .disabled(working)
+            }
+        }
+        let vpns = host.installed.filter { host.asksForProxy($0.id) }
+        if !vpns.isEmpty {
+            SettingsGroup(title: L("VPN", "VPN")) {
+                ForEach(vpns) { record in
+                    Toggle(isOn: Binding(get: { record.proxyAllowed == true }, set: { host.setProxyAllowed($0, for: record.id) })) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(L("\(record.name) peut faire passer la navigation par ses serveurs", "\(record.name) may route browsing through its servers"))
+                            if let server = proxy.server, proxy.owner == record.id {
+                                Text(L("Connectée via \(server.host)", "Connected through \(server.host)"))
+                                    .font(.system(size: 11)).foregroundStyle(Theme.secondaryText)
+                            }
+                        }
+                    }
+                }
+                Note(L("Toutes les pages passent alors par le serveur qu'elle choisit, celles des fenêtres privées comprises, sans qu'elle y ait accès pour autant. Ses propres échanges avec son service restent directs.",
+                       "All pages then go through the server it picks, private windows included, without giving it access to them. Its own exchanges with its service stay direct."))
             }
         }
         SettingsGroup(title: L("Depuis le Chrome Web Store", "From the Chrome Web Store")) {

@@ -15,6 +15,10 @@ struct InstalledExtension: Codable, Identifiable, Equatable {
     var laterSites: [String]?
     /// Its own button in the bar, beside the extensions button (nil: only in the panel).
     var pinned: Bool?
+    /// A VPN (chrome.proxy): whether the user lets it route pages through its servers (nil: not
+    /// asked yet), and what it set, restored at the next launch.
+    var proxyAllowed: Bool?
+    var proxy: SavedProxy?
 }
 
 /// An extension found in another browser's folder.

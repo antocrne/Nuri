@@ -278,6 +278,7 @@ final class DownloadManager {
     private func hiddenWebView(for item: DownloadItem) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = item.store ?? (item.isPrivate ? .nonPersistent() : .default())
+        ExtensionProxy.shared.attach(to: configuration.websiteDataStore)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         item.resumingWebView = webView
         return webView

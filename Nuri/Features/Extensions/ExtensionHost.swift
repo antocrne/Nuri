@@ -18,6 +18,7 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
     @ObservationIgnored private(set) var controller: WKWebExtensionController?
     @ObservationIgnored private var loaded = true
     @ObservationIgnored private var waiters: [() -> Void] = []
+    @ObservationIgnored private var asksProxy: [String: Bool] = [:]
 
     /// The controller's storage (what extensions keep), the same at every launch.
     private static let storeID = UUID(uuidString: "6E757269-6578-7400-8000-6E7572696578")!
@@ -115,8 +116,12 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         for site in record.laterSites ?? [] {
             if let pattern = try? WKWebExtension.MatchPattern(string: site) { context.setPermissionStatus(.grantedExplicitly, for: pattern) }
         }
+        // A VPN's way to Nuri for chrome.proxy (ExtensionProxy): runtime.sendNativeMessage, which
+        // only ever reaches Nuri itself.
+        if Self.wantsProxy(webExtension) { context.setPermissionStatus(.grantedExplicitly, for: .nativeMessaging) }
         try makeController().load(context)
         contexts[id] = context
+        if let saved = record.proxy, record.proxyAllowed == true { ExtensionProxy.shared.restore(saved, for: id) }
         watchBackground(context)
     }
 
@@ -145,7 +150,8 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         let previous = installed.first { $0.id == id }
         let record = InstalledExtension(id: id, name: installedCopy.displayName ?? id, version: installedCopy.version ?? "",
                                         source: source, enabled: previous?.enabled ?? true,
-                                        laterPermissions: previous?.laterPermissions, laterSites: previous?.laterSites)
+                                        laterPermissions: previous?.laterPermissions, laterSites: previous?.laterSites,
+                                        proxyAllowed: previous?.proxyAllowed, proxy: previous?.proxy)
         installed.removeAll { $0.id == id }
         installed.append(record)
         installed.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -239,6 +245,8 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         } else {
             unload(id)
             problems[id] = nil
+            // As in Chrome: what it had set goes with it.
+            rememberProxy(nil, for: id)
         }
     }
 
@@ -263,6 +271,7 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
     }
 
     private func unload(_ id: String) {
+        ExtensionProxy.shared.release(id, telling: false)
         guard let context = contexts[id] else { return }
         try? controller?.unload(context)
         contexts[id] = nil
@@ -300,6 +309,10 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         let reached = words.filter { granted.contains($0.0) && seen.insert($0.1).inserted }.map { L($0.1, $0.2) }
         if !reached.isEmpty {
             lines.append(L("Accès à : \(reached.joined(separator: ", ")).", "Access to: \(reached.joined(separator: ", "))."))
+        }
+        if wantsProxy(webExtension) {
+            lines.append(L("C'est un VPN : Nuri vous demandera avant de faire passer votre navigation par ses serveurs.",
+                           "It's a VPN: Nuri will ask you before routing your browsing through its servers."))
         }
         lines.append(L("Jamais dans les fenêtres privées. Les extensions ne viennent pas de Nuri : n'ajoutez que celles en qui vous avez confiance.",
                        "Never in private windows. Extensions don't come from Nuri: only add those you trust."))
@@ -432,6 +445,78 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         page.load(URLRequest(url: context.baseURL.appendingPathComponent(ExtensionFiles.blankPageFile)))
         for _ in 0..<30 where page.isLoading || page.url == nil { try? await Task.sleep(for: .milliseconds(100)) }
         return page
+    }
+
+    // MARK: - VPN (chrome.proxy, see ExtensionProxy)
+
+    static func wantsProxy(_ webExtension: WKWebExtension) -> Bool {
+        (webExtension.manifest["permissions"] as? [String])?.contains("proxy") == true
+    }
+
+    /// Whether it asks for chrome.proxy, turned off or not.
+    func asksForProxy(_ id: String) -> Bool {
+        if let webExtension = contexts[id]?.webExtension { return Self.wantsProxy(webExtension) }
+        if let known = asksProxy[id] { return known }
+        let manifest = (try? Data(contentsOf: ExtensionFiles.folder(of: id).appendingPathComponent("manifest.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let asks = (manifest?["permissions"] as? [String])?.contains("proxy") == true
+        asksProxy[id] = asks
+        return asks
+    }
+
+    func proxyAllowed(_ id: String) -> Bool? { installed.first { $0.id == id }?.proxyAllowed }
+
+    /// Whether the user lets it route pages through its servers: asked the first time it tries.
+    func mayRoute(_ context: WKWebExtensionContext) -> Bool {
+        let id = context.uniqueIdentifier
+        if let allowed = proxyAllowed(id) { return allowed }
+        guard installed.contains(where: { $0.id == id }) else { return false }
+        let name = context.webExtension.displayName ?? ""
+        let allowed = ask(context, title: L("« \(name) » veut servir de VPN", "“\(name)” wants to act as a VPN"),
+                          more: L("Toutes vos pages passeraient par ses serveurs, celles des fenêtres privées comprises. Modifiable dans Réglages › Extensions.",
+                                  "All your pages would go through its servers, private windows included. You can change this in Settings › Extensions."))
+        setProxyAllowed(allowed, for: id)
+        return allowed
+    }
+
+    func setProxyAllowed(_ allowed: Bool, for id: String) {
+        guard let index = installed.firstIndex(where: { $0.id == id }) else { return }
+        installed[index].proxyAllowed = allowed
+        if !allowed { installed[index].proxy = nil }
+        ExtensionFiles.save(installed)
+        if !allowed { ExtensionProxy.shared.release(id, telling: true) }
+    }
+
+    func rememberProxy(_ saved: SavedProxy?, for id: String) {
+        guard let index = installed.firstIndex(where: { $0.id == id }), installed[index].proxy != saved else { return }
+        installed[index].proxy = saved
+        ExtensionFiles.save(installed)
+    }
+
+    /// The password it gives for `server`, from its webRequest.onAuthRequired listeners.
+    func proxyCredential(from id: String, for server: ExtensionProxy.Server) async -> ExtensionProxy.Credential? {
+        guard let context = contexts[id] else { return nil }
+        let reply = await askBackground(context, ["nuriProxyAuth": ["host": server.host, "port": server.port, "scheme": server.scheme]],
+                                        timeout: 25) as? [String: Any]
+        guard let user = reply?["username"] as? String, let password = reply?["password"] as? String else { return nil }
+        return ExtensionProxy.Credential(user: user, password: password)
+    }
+
+    /// Its chrome.proxy.settings.onChange.
+    func tellProxyChanged(_ id: String, _ details: [String: Any]) {
+        guard let context = contexts[id] else { return }
+        Task { _ = await askBackground(context, ["nuriProxyChanged": details], timeout: 5) }
+    }
+
+    /// A question for extension-shim.js in its background, from a blank page of its own (see
+    /// backgroundAnswers). nil without an answer.
+    private func askBackground(_ context: WKWebExtensionContext, _ message: [String: Any], timeout: Double) async -> Any? {
+        guard let page = await blankPage(of: context) else { return nil }
+        return await page.nuriCall("""
+            return await Promise.race([
+              browser.runtime.sendMessage(message).then((reply) => reply ?? null, () => null),
+              new Promise((done) => setTimeout(() => done(null), \(Int(timeout * 1000))))]);
+            """, arguments: ["message": message], world: .page, timeout: timeout + 1)
     }
 
     func openOptions(_ id: String, in browser: BrowserModel) {
@@ -575,17 +660,28 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         ExtensionFiles.save(installed)
     }
 
-    private func ask(_ context: WKWebExtensionContext, more what: String) -> Bool {
+    private func ask(_ context: WKWebExtensionContext, title: String? = nil, more what: String) -> Bool {
         #if DEBUG
         if SelfTestRunner.isRequested { return false }
         #endif
         let name = context.webExtension.displayName ?? ""
         let alert = NSAlert()
-        alert.messageText = L("« \(name) » demande un accès en plus", "“\(name)” is asking for more access")
+        alert.messageText = title ?? L("« \(name) » demande un accès en plus", "“\(name)” is asking for more access")
         alert.informativeText = what
         alert.addButton(withTitle: L("Autoriser", "Allow"))
         alert.addButton(withTitle: L("Refuser", "Deny"))
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// runtime.sendNativeMessage: only Nuri's own chrome.proxy answers (extension-shim.js), for an
+    /// extension that asked for it. No app of the Mac is ever reached.
+    func webExtensionController(_ controller: WKWebExtensionController, sendMessage message: Any, toApplicationWithIdentifier applicationIdentifier: String?,
+                                for extensionContext: WKWebExtensionContext, replyHandler: @escaping (Any?, (any Error)?) -> Void) {
+        guard applicationIdentifier == ExtensionProxy.appID, Self.wantsProxy(extensionContext.webExtension) else {
+            replyHandler(nil, NSError(domain: "Nuri", code: 1, userInfo: [NSLocalizedDescriptionKey: L("Nuri ne relie pas les extensions aux apps du Mac.", "Nuri doesn't connect extensions to Mac apps.")]))
+            return
+        }
+        Task { replyHandler(await ExtensionProxy.shared.handle(message, from: extensionContext), nil) }
     }
 
     func webExtensionController(_ controller: WKWebExtensionController, didUpdate action: WKWebExtension.Action, forExtensionContext context: WKWebExtensionContext) {

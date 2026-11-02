@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Network
+import os
 import SwiftUI
 import WebKit
 
@@ -66,6 +67,7 @@ final class FeatureSelfTest {
             ("attente", { await $0.testHold() }),
             ("extensions", { await $0.testExtensions() }),
             ("lancement", { await $0.testExtensionsAtLaunch() }),
+            ("vpn", { await $0.testVPN() }),
             ("lecture", { await $0.testReader() }),
             ("historique", { await $0.testHistory() }),
             ("signets", { await $0.testBookmarks() }),
@@ -2375,6 +2377,281 @@ final class FeatureSelfTest {
         _ = await htmlTab("<title>Recettes de saison</title>r")
         _ = await htmlTab("<title>Carnet de voyage</title>c")
         await snapshot("barre")
+    }
+
+    // MARK: VPN
+
+    /// chrome.proxy (ExtensionProxy): what values say, then a VPN extension of our own routing
+    /// real pages through a local server that wants a password, as Proton VPN does.
+    private func testVPN() async {
+        /// nil when refused, `.some(nil)` for no server.
+        func read(_ value: [String: Any]) async -> ExtensionProxy.Server?? {
+            do { return .some(try await ExtensionProxy.server(from: value)) } catch { return nil }
+        }
+        let proton: [String: Any] = ["mode": "fixed_servers", "rules": [
+            "singleProxy": ["scheme": "https", "host": "node-fr-01.protonvpn.net", "port": 4443],
+            "bypassList": ["localhost", "127.0.0.1", "127.0.0.0/8", "127.0.0.1:80", "[::1]", "<local>", "*.exemple.fr", ".site.fr"]]]
+        let protonServer = await read(proton)
+        check("VPN : le réglage de Proton se lit", protonServer == ExtensionProxy.Server(scheme: "https", host: "node-fr-01.protonvpn.net", port: 4443,
+                                                                               bypass: ["localhost", "127.0.0.1", "::1", "exemple.fr", "site.fr"]), "\(String(describing: protonServer))")
+        let direct = await read(["mode": "direct"])
+        check("VPN : « direct », aucun serveur", direct == .some(nil))
+        let socks4 = await read(["mode": "fixed_servers", "rules": ["singleProxy": ["scheme": "socks4", "host": "a.b", "port": 1]]])
+        check("VPN : SOCKS4 refusé", socks4 == nil)
+        let pac = await read(["mode": "pac_script", "pacScript": ["data": """
+            function FindProxyForURL(url, host) {
+              if (isPlainHostName(host) || isInNet(host, "10.0.0.0", "255.0.0.0") || shExpMatch(host, "*.lan")) return "DIRECT";
+              return "HTTPS vpn.exemple.fr:4443; DIRECT";
+            }
+            """]])
+        check("VPN : un script PAC donne son serveur", pac??.host == "vpn.exemple.fr" && pac??.scheme == "https" && pac??.port == 4443, "\(String(describing: pac))")
+        let includeOnly = await read(["mode": "pac_script", "pacScript": ["data": """
+            function FindProxyForURL(url, host) { if ((host === "seul.fr")) { return "HTTPS vpn.exemple.fr:4443"; } return "DIRECT"; }
+            """]])
+        check("VPN : « seulement ces sites » refusé plutôt que suivi à moitié", includeOnly == nil)
+        let endless = await read(["mode": "pac_script", "pacScript": ["data": "function FindProxyForURL() { for (;;) {} }"]])
+        check("VPN : un script PAC sans fin ne bloque pas Nuri", endless == nil)
+
+        guard #available(macOS 15.4, *) else {
+            note("VPN : macOS trop ancien pour la suite")
+            return
+        }
+        guard let server = TestProxy(), let port = await server.start() else {
+            check("VPN : serveur de test", false)
+            return
+        }
+        defer { server.stop() }
+        let host = ExtensionHost.shared
+        let proxy = ExtensionProxy.shared
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("nuri-vpn-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let files = [
+            "manifest.json": """
+            {"manifest_version":3,"name":"VPN essai","version":"1.0","permissions":["proxy","storage","webRequest","webRequestAuthProvider"],
+             "host_permissions":["https://*/","http://*/","ftp://*/","wss://*/","ws://*/"],"background":{"service_worker":"background.js"},"options_page":"options.html"}
+            """,
+            "options.html": "<!doctype html><title>VPN essai</title>options",
+            // Like Proton: the password in onAuthRequired (asyncBlocking), set and get with callbacks.
+            "background.js": """
+            let password = "secret", skip = 0, ordered = null;
+            const asked = [], changes = [];
+            // As Proton does at start: a get right after a set nobody waited for.
+            chrome.storage.local.set({ nuriOrder: 1 });
+            chrome.storage.local.get("nuriOrder").then((got) => { ordered = got.nuriOrder === 1; });
+            chrome.webRequest.onAuthRequired.addListener((details, callback) => {
+              asked.push(details.isProxy ? details.challenger.host : "page");
+              if (skip > 0) { skip--; callback({}); return; }
+              callback({ authCredentials: { username: "nuri", password } });
+            }, { urls: ["<all_urls>"] }, ["asyncBlocking", "extraHeaders"]);
+            chrome.proxy.settings.onChange.addListener((details) => changes.push(details.levelOfControl));
+            chrome.runtime.onMessage.addListener((message, sender, reply) => {
+              if (message.kind === "connect") {
+                skip = message.skip || 0;
+                const value = { mode: "fixed_servers", rules: { singleProxy: { scheme: "http", host: "127.0.0.1", port: message.port }, bypassList: ["localhost", "<local>"] } };
+                chrome.proxy.settings.set({ value, scope: "regular" }).then(() => null, (error) => error.message).then((error) => {
+                  chrome.proxy.settings.get({}, (setting) => reply({ error, level: setting && setting.levelOfControl }));
+                });
+                return true;
+              }
+              if (message.kind === "disconnect") { chrome.proxy.settings.clear({}, () => reply(true)); return true; }
+              if (message.kind === "password") { password = message.password; reply(true); return; }
+              if (message.kind === "state") { reply({ asked, changes, ordered, native: typeof chrome.runtime.sendNativeMessage }); return; }
+              // What Proton asks before anything else, from its popup ("Allow VPN permissions").
+              if (message.kind === "granted") {
+                const origins = ["http://*/*", "https://*/*", "ftp://*/*", "ws://*/*", "wss://*/*", "https://account.protonvpn.com/*", "https://account.proton.me/*"];
+                Promise.all([chrome.permissions.contains({ permissions: ["proxy"], origins }), chrome.permissions.request({ permissions: ["proxy"], origins })])
+                  .then(([contains, request]) => reply({ contains, request }), (error) => reply({ error: error.message }));
+                return true;
+              }
+            });
+            """,
+        ]
+        for (name, text) in files { try? text.write(to: folder.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        let id = "ponmlkjihgfedcbaponmlkjihgfedcba"
+        guard (try? await host.add(from: folder, id: id, source: .browser, asks: false)) == true else {
+            check("VPN : extension ajoutée", false, host.problems[id] ?? "")
+            return
+        }
+        defer { host.remove(id) }
+        check("VPN : reconnue comme VPN", host.asksForProxy(id))
+        host.openOptions(id, in: browser)
+        guard let options = browser.selectedTab else { return }
+        await waitForLoad(options)
+        func ask(_ message: [String: Any]) async -> [String: Any]? {
+            try? await options.webView?.callAsyncJavaScript("return await chrome.runtime.sendMessage(message)", arguments: ["message": message],
+                                                            contentWorld: .page) as? [String: Any]
+        }
+        let first = await ask(["kind": "state"])
+        check("VPN : le chemin vers Nuri existe (sendNativeMessage)", first?["native"] as? String == "function", "\(String(describing: first))")
+        let granted = await ask(["kind": "granted"])
+        check("VPN : sa permission « proxy » accordée, comme Chrome à l'installation", granted?["contains"] as? Bool == true && granted?["request"] as? Bool == true,
+              "\(String(describing: granted))")
+        check("VPN : le stockage suit l'ordre des appels, comme dans Chrome", first?["ordered"] as? Bool == true, "\(String(describing: first?["ordered"]))")
+
+        // Never asked: Nuri asks (the self-test answers no), and that answer stays.
+        let refused = await ask(["kind": "connect", "port": Int(port)])
+        check("VPN : sans accord, refusé avec une raison", (refused?["error"] as? String)?.contains("VPN") == true && proxy.server == nil, "\(String(describing: refused))")
+        check("VPN : la réponse est gardée", host.proxyAllowed(id) == false)
+
+        // Allowed in Settings. Its first answer has no password: the server's 407 asks again.
+        host.setProxyAllowed(true, for: id)
+        let connected = await ask(["kind": "connect", "port": Int(port), "skip": 1])
+        check("VPN : connecté, l'extension le voit", connected?["level"] as? String == "controlled_by_this_extension" && connected?["error"] is NSNull,
+              "\(String(describing: connected))")
+        check("VPN : Nuri suit son serveur", proxy.server?.host == "127.0.0.1" && proxy.server?.port == Int(port) && proxy.owner == id)
+        snapshot(panel: VStack(alignment: .leading) { ExtensionsPane() }.padding(20).frame(width: 560), "vpn-reglages")
+        check("VPN : gardé pour le prochain lancement", ExtensionFiles.loadRecords().first { $0.id == id }?.proxy?.server?.port == Int(port))
+        // Sites no other section opened: a connection open before keeps its route (ExtensionProxy).
+        let page = browser.openTab(url: URL(string: "https://www.iana.org/help/example-domains"))
+        await waitForLoad(page)
+        let state = await ask(["kind": "state"])
+        check("VPN : la page passe par le serveur", page.loadError == nil && server.opened.contains("www.iana.org:443"),
+              "\(page.loadError ?? "") · ouverts \(server.opened) · refusés \(server.refused) · demandé \(String(describing: state?["asked"]))")
+        check("VPN : le mot de passe demandé à l'extension, pour son serveur", (state?["asked"] as? [String])?.filter { $0 == "127.0.0.1" }.count ?? 0 >= 2,
+              "\(String(describing: state?["asked"]))")
+
+        // Private windows too (Chrome's "regular" setting), without the extension in them.
+        let privateWindow = BrowserWindows.shared.openPrivateWindow()
+        let hidden = privateWindow.openTab(url: URL(string: "https://www.example.net/?vpn"))
+        await waitForLoad(hidden)
+        check("VPN : les fenêtres privées aussi", hidden.loadError == nil && server.opened.contains("www.example.net:443"), "\(hidden.loadError ?? "") · \(server.opened)")
+        privateWindow.window?.close()
+        await sleep(0.3)
+        browser.window?.makeKeyAndOrderFront(nil)
+
+        // Its password changes (Proton's last 20 minutes): the page that fails is loaded again.
+        _ = await ask(["kind": "password", "password": "secret2"])
+        server.password = "secret2"
+        await sleep(10.5)
+        let later = browser.openTab(url: URL(string: "https://www.example.org/?vpn"))
+        let recovered = await until(25) { later.loadError == nil && later.webView?.url?.host() == "www.example.org" && server.opened.contains("www.example.org:443") && !later.isLoading }
+        check("VPN : mot de passe expiré, redemandé et la page rechargée", recovered, "\(later.loadError ?? "") · \(server.opened) · refusés \(server.refused)")
+
+        // Turned off in Settings: pages go direct again, and the extension hears it.
+        host.setProxyAllowed(false, for: id)
+        check("VPN : désactivé dans les réglages, plus de serveur", proxy.server == nil && ExtensionProxy.routing.withLock { $0.configurations.isEmpty })
+        var heard = false
+        for _ in 0..<16 where !heard {
+            heard = (await ask(["kind": "state"])?["changes"] as? [String])?.contains("not_controllable") == true
+            if !heard { await sleep(0.5) }
+        }
+        check("VPN : l'extension l'apprend (onChange)", heard)
+        let opened = server.opened.count
+        let directPage = browser.openTab(url: URL(string: "https://www.example.com/?direct"))
+        await waitForLoad(directPage)
+        check("VPN : la page ne passe plus par le serveur", directPage.loadError == nil && server.opened.count == opened, "\(server.opened)")
+        check("VPN : plus rien de gardé", ExtensionFiles.loadRecords().first { $0.id == id }?.proxy == nil)
+
+        // Allowed again, then disconnected by the extension.
+        host.setProxyAllowed(true, for: id)
+        _ = await ask(["kind": "connect", "port": Int(port)])
+        check("VPN : reconnecté", proxy.owner == id)
+        _ = await ask(["kind": "disconnect"])
+        check("VPN : déconnecté par l'extension", proxy.server == nil && proxy.owner == nil)
+
+        // Turned off: whatever it had set goes.
+        _ = await ask(["kind": "connect", "port": Int(port)])
+        host.setEnabled(false, for: id)
+        check("VPN : extension désactivée, plus de serveur", proxy.server == nil)
+    }
+}
+
+/// A proxy for the vpn section: HTTP CONNECT only, wanting `password` for the user nuri, noting
+/// the tunnels it opens.
+private final class TestProxy: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "nuri.selftest.proxy")
+    private let state = OSAllocatedUnfairLock(initialState: (password: "secret", opened: [String](), refused: 0))
+
+    var password: String {
+        get { state.withLock { $0.password } }
+        set { state.withLock { $0.password = newValue } }
+    }
+    var opened: [String] { state.withLock { $0.opened } }
+    var refused: Int { state.withLock { $0.refused } }
+
+    init?() {
+        guard let listener = try? NWListener(using: .tcp, on: .any) else { return nil }
+        self.listener = listener
+    }
+
+    func start() async -> UInt16? {
+        listener.newConnectionHandler = { [weak self] in self?.serve($0) }
+        let once = OSAllocatedUnfairLock(initialState: false)
+        return await withCheckedContinuation { continuation in
+            listener.stateUpdateHandler = { [listener] state in
+                let port: UInt16?
+                switch state {
+                case .ready: port = listener.port?.rawValue
+                case .failed, .cancelled: port = nil
+                default: return
+                }
+                if once.withLock({ done in defer { done = true }; return !done }) { continuation.resume(returning: port) }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    func stop() { listener.cancel() }
+
+    private func serve(_ client: NWConnection) {
+        client.start(queue: queue)
+        readHead(client, Data())
+    }
+
+    private func readHead(_ client: NWConnection, _ data: Data) {
+        client.receive(minimumIncompleteLength: 1, maximumLength: 65536) { chunk, _, done, error in
+            var data = data
+            if let chunk { data.append(chunk) }
+            guard let end = data.range(of: Data("\r\n\r\n".utf8)) else {
+                if done || error != nil { client.cancel() } else { self.readHead(client, data) }
+                return
+            }
+            self.answer(client, head: String(decoding: data[..<end.lowerBound], as: UTF8.self), rest: Data(data[end.upperBound...]))
+        }
+    }
+
+    private func answer(_ client: NWConnection, head: String, rest: Data) {
+        let lines = head.components(separatedBy: "\r\n")
+        let parts = lines.first?.split(separator: " ") ?? []
+        let given = lines.first { $0.lowercased().hasPrefix("proxy-authorization:") }
+            .map { $0.drop { $0 != ":" }.dropFirst().trimmingCharacters(in: .whitespaces) }
+        guard parts.count >= 2, parts[0] == "CONNECT", let colon = parts[1].lastIndex(of: ":"),
+              let port = NWEndpoint.Port(String(parts[1][parts[1].index(after: colon)...])) else { return client.cancel() }
+        guard given == "Basic " + Data("nuri:\(password)".utf8).base64EncodedString() else {
+            state.withLock { $0.refused += 1 }
+            let refusal = "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"nuri\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            client.send(content: Data(refusal.utf8), completion: .contentProcessed { _ in client.cancel() })
+            return
+        }
+        state.withLock { $0.opened.append(String(parts[1])) }
+        let server = NWConnection(host: NWEndpoint.Host(String(parts[1][..<colon])), port: port, using: .tcp)
+        server.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                client.send(content: Data("HTTP/1.1 200 Connection established\r\n\r\n".utf8), completion: .contentProcessed { _ in
+                    if !rest.isEmpty { server.send(content: rest, completion: .idempotent) }
+                    self.pipe(client, server)
+                    self.pipe(server, client)
+                })
+            case .failed, .cancelled: client.cancel()
+            default: break
+            }
+        }
+        server.start(queue: queue)
+    }
+
+    private func pipe(_ from: NWConnection, _ to: NWConnection) {
+        from.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, done, error in
+            if let data, !data.isEmpty { to.send(content: data, completion: .idempotent) }
+            if done || error != nil {
+                to.cancel()
+                from.cancel()
+                return
+            }
+            self.pipe(from, to)
+        }
     }
 }
 #endif

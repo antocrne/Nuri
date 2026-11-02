@@ -62,6 +62,7 @@ enum WebViewFactory {
             config.websiteDataStore = isPrivate ? .nonPersistent() : BrowserModel.shared.currentSpace.dataStore
         }
         WebCryptoMasterKey.shared.attach(to: config.websiteDataStore)
+        ExtensionProxy.shared.attach(to: config.websiteDataStore)
         config.applicationNameForUserAgent = userAgentSuffix
         config.allowsAirPlayForMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = AppSettings.shared.blockAutoplayWithSound ? .audio : []

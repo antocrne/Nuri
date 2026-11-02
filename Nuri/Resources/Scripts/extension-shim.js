@@ -38,6 +38,37 @@
     Object.defineProperty(native, "runtime", { value: runtime, configurable: true, writable: true, enumerable: true });
   } catch {}
 
+  // chrome.storage: Chrome runs an area's calls in the order they were made, so a get right after
+  // a set nobody waited for sees the new value. WebKit doesn't (never, in 20 tries on 2026-11-02),
+  // and Proton VPN, which checks its service that way when it starts, then says the network blocks
+  // it. Each area's calls wait here for the one before.
+  const areas = native.storage;
+  if (areas) {
+    for (const name of ["local", "session", "sync"]) {
+      const area = areas[name];
+      if (!area) continue;
+      try {
+        Object.defineProperty(areas, name, { value: area, configurable: true, writable: true, enumerable: true });
+      } catch {}
+      let last = Promise.resolve();
+      for (const method of ["get", "getKeys", "getBytesInUse", "set", "remove", "clear", "setAccessLevel"]) {
+        if (typeof area[method] !== "function") continue;
+        const original = area[method].bind(area);
+        const ordered = (...args) => {
+          const callback = typeof args[args.length - 1] === "function" ? args.pop() : undefined;
+          const run = last.then(() => original(...args));
+          // A call WebKit never answered doesn't hold the next ones for more than 3 s.
+          last = Promise.race([run.catch(() => {}), new Promise((done) => setTimeout(done, 3000))]);
+          if (!callback) return run;
+          run.then((value) => callback(value), () => callback());
+        };
+        try {
+          Object.defineProperty(area, method, { value: ordered, configurable: true, writable: true, enumerable: true });
+        } catch {}
+      }
+    }
+  }
+
   // Content scripts run in web pages: the rest is for the extension's own contexts.
   if (globalThis.location && globalThis.location.protocol !== "webkit-extension:") return;
 
@@ -50,24 +81,36 @@
     }
   } catch {}
 
-  // Nuri asks the background whether it is there (ExtensionHost.backgroundAnswers): what
-  // WebKit tells of a service worker isn't reliable. Registered before the extension's own
-  // listeners: its answer comes first. They never see the question, which some would choke on
-  // (uBlock Origin Lite reads a field every message of its own has).
-  if (typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope) {
+  const inBackground = (typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope)
+    || (() => { try { return native.extension.getBackgroundPage() === globalThis; } catch { return false; } })();
+
+  // Nuri's questions to the background, sent from a blank page of the extension's own: whether it
+  // is there (ExtensionHost.backgroundAnswers; what WebKit tells of a service worker isn't
+  // reliable), and for chrome.proxy below. Registered before the extension's own listeners: the
+  // answer comes first. They never see the question, in any of its contexts, which some would
+  // choke on (uBlock Origin Lite reads a field every message of its own has).
+  const answers = { nuriPing: () => ({ nuriPong: true }) };
+  {
     try {
-      const isPing = (message) => !!message && message.nuriPing === true;
+      const question = (message) => (message && typeof message === "object" ? Object.keys(answers).find((key) => key in message) : undefined);
       const onMessage = runtime.onMessage;
       Object.defineProperty(runtime, "onMessage", { value: onMessage, configurable: true, writable: true, enumerable: true });
       const add = onMessage.addListener.bind(onMessage);
       const remove = onMessage.removeListener.bind(onMessage);
       const has = onMessage.hasListener.bind(onMessage);
-      add((message, sender, sendResponse) => {
-        if (isPing(message) && sender && sender.id === runtime.id) sendResponse({ nuriPong: true });
-      });
+      if (inBackground) {
+        add((message, sender, sendResponse) => {
+          const key = question(message);
+          if (!key || !sender || sender.id !== runtime.id) return;
+          const reply = answers[key](message[key]);
+          if (!reply || typeof reply.then !== "function") return sendResponse(reply);
+          reply.then(sendResponse, () => sendResponse(null));
+          return true;
+        });
+      }
       const wrappers = new Map();
       const wrapper = (listener) => {
-        if (!wrappers.has(listener)) wrappers.set(listener, (message, ...rest) => (isPing(message) ? undefined : listener(message, ...rest)));
+        if (!wrappers.has(listener)) wrappers.set(listener, (message, ...rest) => (question(message) ? undefined : listener(message, ...rest)));
         return wrappers.get(listener);
       };
       for (const [name, value] of [
@@ -144,6 +187,19 @@
   // Chrome answers « no » about a permission it can't give; WebKit throws, and Bitwarden's popup,
   // which asks while it draws, stays blank. « privacy » is granted: Nuri has no password manager of
   // its own for an extension to take over from, so that step of theirs is done from the start.
+  // « proxy » too, when the manifest asks for it, as Chrome grants it at install: WebKit doesn't
+  // know it, and Proton VPN stops at its « Allow VPN permissions » screen. Nuri asks the user when
+  // the extension first sets a server (ExtensionProxy).
+  // Sites: WebKit keeps only the http and https patterns of a manifest, and Chrome gives the
+  // others at install too. A WebSocket goes with its site's http(s) access; ftp, which Chrome no
+  // longer has either, with nothing.
+  const granted = new Set(["privacy"]);
+  if (((runtime.getManifest() || {}).permissions || []).includes("proxy")) granted.add("proxy");
+  const asWebKit = (origins) => (origins || []).flatMap((origin) => {
+    const scheme = String(origin).split(":")[0].toLowerCase();
+    if (scheme === "ftp") return [];
+    return [scheme === "ws" || scheme === "wss" ? String(origin).replace(/^ws/i, "http") : origin];
+  });
   const permissions = native.permissions;
   if (permissions && typeof permissions.contains === "function") {
     try {
@@ -152,8 +208,9 @@
     for (const name of ["contains", "request"]) {
       const original = permissions[name].bind(permissions);
       const answer = (details) => new Promise((done) => {
-        const others = ((details && details.permissions) || []).filter((permission) => permission !== "privacy");
-        done(others.length || (details && details.origins && details.origins.length) ? original({ ...details, permissions: others }) : true);
+        const others = ((details && details.permissions) || []).filter((permission) => !granted.has(permission));
+        const origins = asWebKit(details && details.origins);
+        done(others.length || origins.length ? original({ ...details, permissions: others, origins }) : true);
       }).catch(() => false);
       try {
         Object.defineProperty(permissions, name, {
@@ -256,6 +313,103 @@
     define(rules, "DomainType", () => constants(["firstParty", "thirdParty"]));
     define(rules, "RequestMethod", () => constants(["connect", "delete", "get", "head", "options", "patch", "post", "put", "other"]));
   }
+  // chrome.proxy (VPN extensions): WebKit has none. Nuri routes pages through the server the
+  // extension sets (ExtensionProxy), reached by runtime.sendNativeMessage, which Nuri answers
+  // itself for an extension asking for "proxy" and never passes to an app of the Mac. The
+  // server's password comes from the extension's webRequest.onAuthRequired: WebKit never calls
+  // it, so the listeners are kept here and called when Nuri asks, in the background.
+  const manifest = runtime.getManifest() || {};
+  if ((manifest.permissions || []).includes("proxy") && native.proxy === undefined) {
+    const toNuri = (message) => {
+      if (typeof runtime.sendNativeMessage !== "function") return Promise.reject(new Error("chrome.proxy n'est pas pris en charge par Nuri"));
+      return runtime.sendNativeMessage("app.nuri.proxy", message).then((reply) => {
+        if (reply && reply.error) throw new Error(reply.error);
+        return reply || {};
+      });
+    };
+    const changeListeners = new Set();
+    const changed = {
+      addListener: (listener) => { changeListeners.add(listener); },
+      removeListener: (listener) => { changeListeners.delete(listener); },
+      hasListener: (listener) => changeListeners.has(listener),
+      hasListeners: () => changeListeners.size > 0,
+    };
+    define(native, "proxy", () => ({
+      settings: {
+        get: (details, callback) => settle(toNuri({ get: true }), typeof details === "function" ? details : callback),
+        set: (details, callback) => settle(toNuri({ set: (details && details.value) || {} }).then(() => undefined), callback),
+        clear: (details, callback) => settle(toNuri({ clear: true }).then(() => undefined), typeof details === "function" ? details : callback),
+        onChange: changed,
+      },
+      onProxyError: event(),
+    }));
+    answers.nuriProxyChanged = (details) => {
+      for (const listener of [...changeListeners]) { try { listener(details); } catch {} }
+      return true;
+    };
+
+    // WebKit's event keeps its place (a new one put there is ignored): its methods are replaced,
+    // as for runtime.onMessage above.
+    const authListeners = [];
+    const authMethods = {
+      addListener: (listener, filter, extraInfo) => {
+        if (!authListeners.some((entry) => entry.listener === listener)) authListeners.push({ listener, extraInfo: extraInfo || [] });
+      },
+      removeListener: (listener) => {
+        const index = authListeners.findIndex((entry) => entry.listener === listener);
+        if (index >= 0) authListeners.splice(index, 1);
+      },
+      hasListener: (listener) => authListeners.some((entry) => entry.listener === listener),
+      hasListeners: () => authListeners.length > 0,
+    };
+    const webRequest = native.webRequest;
+    const onAuthRequired = webRequest && webRequest.onAuthRequired;
+    if (onAuthRequired) {
+      try {
+        Object.defineProperty(native, "webRequest", { value: webRequest, configurable: true, writable: true, enumerable: true });
+        Object.defineProperty(webRequest, "onAuthRequired", { value: onAuthRequired, configurable: true, writable: true, enumerable: true });
+        for (const [name, value] of Object.entries(authMethods)) {
+          Object.defineProperty(onAuthRequired, name, { value, configurable: true, writable: true, enumerable: true });
+        }
+      } catch {}
+    } else if (!webRequest) {
+      define(native, "webRequest", () => ({ onAuthRequired: authMethods }));
+    }
+    // As Chrome asks when the server answers 407: each listener in turn, until one gives a
+    // password. A new request each time (some count the requests they were asked for twice).
+    let requests = 0;
+    answers.nuriProxyAuth = (server) => new Promise((done) => {
+      const scheme = server.scheme === "https" ? "https" : "http";
+      const details = {
+        requestId: `nuri-proxy-${++requests}`, url: `${scheme}://${server.host}:${server.port}/`, method: "GET",
+        frameId: 0, parentFrameId: -1, tabId: -1, type: "other", timeStamp: Date.now(),
+        isProxy: true, scheme: "basic", realm: "", statusCode: 407, statusLine: "HTTP/1.1 407 Proxy Authentication Required",
+        challenger: { host: server.host, port: server.port },
+      };
+      const listeners = [...authListeners];
+      let index = 0;
+      const next = () => {
+        const entry = listeners[index++];
+        if (!entry) return done(null);
+        let answered = false;
+        const answer = (response) => {
+          if (answered) return;
+          answered = true;
+          const credentials = response && response.authCredentials;
+          if (credentials && typeof credentials.username === "string") done({ username: credentials.username, password: String(credentials.password ?? "") });
+          else next();
+        };
+        try {
+          const asynchronous = entry.extraInfo.includes("asyncBlocking");
+          const result = entry.listener(details, asynchronous ? answer : undefined);
+          if (!asynchronous) Promise.resolve(result).then(answer, () => answer());
+        } catch {
+          answer();
+        }
+      };
+      next();
+    });
+  }
   // runtime.getContexts (which pages of the extension are open): none known.
   define(runtime, "ContextType", () => ({ TAB: "TAB", POPUP: "POPUP", BACKGROUND: "BACKGROUND", OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT", SIDE_PANEL: "SIDE_PANEL" }));
   define(runtime, "getContexts", () => (filter, callback) => settle(Promise.resolve([]), callback));
@@ -313,8 +467,6 @@
   // setPanelBehavior({ openPanelOnActionClick: true }): the button opens the panel. Heard in the
   // background only (a service worker, or an older extension's background page).
   const action = native.action || native.browserAction;
-  const inBackground = (typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope)
-    || (() => { try { return native.extension.getBackgroundPage() === globalThis; } catch { return false; } })();
   if (ownPanel && inBackground && action && action.onClicked) {
     try {
       action.onClicked.addListener((tab) => {
