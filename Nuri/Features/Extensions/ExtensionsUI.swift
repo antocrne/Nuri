@@ -3,18 +3,86 @@ import SwiftUI
 import WebKit
 
 /// The bar's one place for extensions: they stay out of the way until asked for, and their popups
-/// hang from here.
+/// hang from here. Pinned ones also get their own button, just before it, and their popup hangs
+/// from that one.
 @available(macOS 15.4, *)
 struct ExtensionsButton: View {
     @Environment(BrowserModel.self) private var browser
     @State private var showing = false
 
     var body: some View {
-        ChromeButton(symbol: "puzzlepiece.extension", help: L("Extensions", "Extensions"), isOn: showing) { showing.toggle() }
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(WindowSpace.name)) } action: { browser.extensionsButtonFrame = $0 }
-            .popover(isPresented: $showing, arrowEdge: .bottom) {
-                ExtensionsPanel(close: { showing = false }).environment(browser)
+        HStack(spacing: 2) {
+            ForEach(ExtensionHost.shared.pinned, id: \.record.id) { item in
+                PinnedExtensionButton(record: item.record, context: item.context)
             }
+            ChromeButton(symbol: "puzzlepiece.extension", help: L("Extensions", "Extensions"), isOn: showing) { showing.toggle() }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(WindowSpace.name)) } action: { browser.extensionsButtonFrame = $0 }
+                .popover(isPresented: $showing, arrowEdge: .bottom) {
+                    ExtensionsPanel(close: { showing = false }).environment(browser)
+                }
+        }
+    }
+}
+
+/// A pinned extension in the bar: its icon in the bar's one color, like the symbols beside it, and
+/// its badge; a click does what its line in the panel does.
+@available(macOS 15.4, *)
+private struct PinnedExtensionButton: View {
+    let record: InstalledExtension
+    let context: WKWebExtensionContext
+    @Environment(BrowserModel.self) private var browser
+    @Environment(\.chromeForeground) private var foreground
+    @State private var hovering = false
+
+    var body: some View {
+        let host = ExtensionHost.shared
+        let action = host.action(of: context, in: browser)
+        let name = action?.label.isEmpty == false ? action!.label : record.name
+        let disabled = action?.isEnabled == false
+        Button { host.performAction(record.id, in: browser) } label: {
+            Group {
+                if let icon = host.icon(of: record.id, in: browser, size: 16) {
+                    Image(nsImage: icon.glyph(side: 15)).renderingMode(.template).foregroundStyle(foreground)
+                } else {
+                    Image(systemName: "puzzlepiece").font(.system(size: 13, weight: .medium)).foregroundStyle(foreground)
+                }
+            }
+            .frame(width: 28, height: 28)
+            .background(RoundedRectangle(cornerRadius: Metrics.controlRadius, style: .continuous)
+                .fill(hovering && !disabled ? Theme.controlHover : .clear))
+            .overlay(alignment: .bottomTrailing) {
+                if let badge = action?.badgeText, !badge.isEmpty {
+                    Text(badge)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(Theme.onAccent)
+                        .lineLimit(1)
+                        .padding(.horizontal, 2.5)
+                        .frame(minWidth: 11, minHeight: 11)
+                        .background(Capsule().fill(Theme.accent))
+                        .fixedSize()
+                        .offset(x: -1, y: -2)
+                        .allowsHitTesting(false)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.35 : 1)
+        .help(name)
+        .accessibilityLabel(name)
+        .onHover { hovering = $0 }
+        .animation(Theme.quick, value: hovering)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(WindowSpace.name)) } action: { browser.pinnedExtensionFrames[record.id] = $0 }
+        .onDisappear { browser.pinnedExtensionFrames[record.id] = nil }
+        .contextMenu {
+            IconMenuItem(L("Désépingler", "Unpin"), "pin.slash") { host.setPinned(false, for: record.id) }
+            if context.webExtension.hasOptionsPage {
+                IconMenuItem(L("Options", "Options"), "slider.horizontal.3") { host.openOptions(record.id, in: browser) }
+            }
+            Divider()
+            IconMenuItem(L("Gérer les extensions…", "Manage Extensions…"), "gearshape") { SettingsWindow.show(.extensions) }
+        }
     }
 }
 
@@ -38,7 +106,8 @@ struct ExtensionsPanel: View {
             }
             ForEach(running, id: \.record.id) { item in
                 ExtensionRow(id: item.record.id, title: item.record.name,
-                             badge: host.action(of: item.context, in: browser)?.badgeText ?? "") {
+                             badge: host.action(of: item.context, in: browser)?.badgeText ?? "",
+                             isPinned: item.record.pinned == true) {
                     close()
                     // A popover can't open another one while it is still going.
                     DispatchQueue.main.async { host.performAction(item.record.id, in: browser) }
@@ -68,38 +137,61 @@ struct ExtensionsPanel: View {
     }
 }
 
+/// A line of the panel: a click runs the extension; the pin, there when the pointer is or once
+/// pinned, gives it its own button in the bar.
 @available(macOS 15.4, *)
 private struct ExtensionRow: View {
     let id: String
     let title: String
     let badge: String
+    let isPinned: Bool
     let action: () -> Void
     @Environment(BrowserModel.self) private var browser
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                ExtensionIcon(id: id, browser: browser)
-                Text(title).lineLimit(1)
-                Spacer(minLength: 8)
-                if !badge.isEmpty {
-                    Text(badge)
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(Theme.onAccent)
-                        .padding(.horizontal, 5)
-                        .frame(height: 16)
-                        .background(Capsule().fill(Theme.accent))
+        HStack(spacing: 4) {
+            Button(action: action) {
+                HStack(spacing: 8) {
+                    ExtensionIcon(id: id, browser: browser)
+                    Text(title).lineLimit(1)
+                    Spacer(minLength: 8)
+                    if !badge.isEmpty {
+                        Text(badge)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(Theme.onAccent)
+                            .padding(.horizontal, 5)
+                            .frame(height: 16)
+                            .background(Capsule().fill(Theme.accent))
+                    }
                 }
+                .foregroundStyle(Theme.text)
+                .padding(.leading, 8)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
             }
-            .foregroundStyle(Theme.text)
-            .padding(.horizontal, 8)
-            .frame(height: 28)
-            .background(RoundedRectangle(cornerRadius: 7).fill(hovering ? Theme.control : .clear))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            if hovering || isPinned {
+                Button { ExtensionHost.shared.setPinned(!isPinned, for: id) } label: {
+                    Image(systemName: isPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(isPinned ? Theme.text : Theme.secondaryText)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isPinned ? L("Retirer de la barre", "Remove from the Bar") : L("Épingler à la barre", "Pin to the Bar"))
+                .accessibilityLabel(isPinned ? L("Retirer de la barre", "Remove from the Bar") : L("Épingler à la barre", "Pin to the Bar"))
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.trailing, 2)
+        .frame(height: 28)
+        .background(RoundedRectangle(cornerRadius: 7).fill(hovering ? Theme.control : .clear))
         .onHover { hovering = $0 }
+        .contextMenu {
+            IconMenuItem(isPinned ? L("Retirer de la barre", "Remove from the Bar") : L("Épingler à la barre", "Pin to the Bar"),
+                         isPinned ? "pin.slash" : "pin") { ExtensionHost.shared.setPinned(!isPinned, for: id) }
+        }
     }
 }
 
@@ -300,5 +392,42 @@ private struct ExtensionsSettings: View {
             await work()
             working = false
         }
+    }
+}
+
+extension NSImage {
+    /// The icon as a one-color glyph, like the bar's symbols (a template, tinted where shown): its
+    /// dark parts ink, its light parts clear, so a logo on a colored square keeps its drawing. An
+    /// icon with nothing dark (drawn in white for dark bars) gives its shape.
+    func glyph(side: CGFloat) -> NSImage {
+        let px = Int(side * 2)
+        guard let context = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: px * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data else { return self }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        draw(in: NSRect(x: 0, y: 0, width: px, height: px))
+        NSGraphicsContext.restoreGraphicsState()
+
+        let pixels = data.bindMemory(to: UInt8.self, capacity: px * px * 4)
+        // Premultiplied: alpha less luminance is the ink, alpha × darkness.
+        var ink = [Double](repeating: 0, count: px * px)
+        for i in 0..<px * px {
+            let r = Double(pixels[i * 4]), g = Double(pixels[i * 4 + 1]), b = Double(pixels[i * 4 + 2])
+            ink[i] = max(0, Double(pixels[i * 4 + 3]) - (0.2126 * r + 0.7152 * g + 0.0722 * b))
+        }
+        let darkest = ink.max() ?? 0
+        let silhouette = darkest < 64
+        for i in 0..<px * px {
+            // The darkest part, full ink; the half-tones pushed toward it (gradients read flat).
+            let alpha = silhouette ? Double(pixels[i * 4 + 3]) : 255 * (ink[i] / darkest).squareRoot()
+            pixels[i * 4] = 0; pixels[i * 4 + 1] = 0; pixels[i * 4 + 2] = 0
+            pixels[i * 4 + 3] = UInt8(min(255, alpha.rounded()))
+        }
+        guard let glyph = context.makeImage() else { return self }
+        let image = NSImage(cgImage: glyph, size: NSSize(width: side, height: side))
+        image.isTemplate = true
+        return image
     }
 }

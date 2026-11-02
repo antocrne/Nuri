@@ -13,6 +13,8 @@ struct InstalledExtension: Codable, Identifiable, Equatable {
     /// the next): permissions' raw values, match patterns.
     var laterPermissions: [String]?
     var laterSites: [String]?
+    /// Its own button in the bar, beside the extensions button (nil: only in the panel).
+    var pinned: Bool?
 }
 
 /// An extension found in another browser's folder.

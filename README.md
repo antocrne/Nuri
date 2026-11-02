@@ -63,7 +63,7 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 | Réunion flottante | Pendant un appel, quitter l'onglet place la page entière dans une petite fenêtre au-dessus des apps, dézoomée à 75 % ; elle revient au retour, par son bouton, ou en raccrochant |
 | Partage d'écran | La question « Partager votre écran ? » propose une seule fenêtre ou l'écran entier, puis macOS laisse choisir laquelle. « Partager aussi le son » : les autres apps et les autres onglets, jamais l'appel |
 | Fermer | ⌥⌘W tous ; clic droit sur un onglet : tous sauf celui-ci. Les onglets des dossiers restent. ⌘⇧T rouvre |
-| Extensions | La pièce de puzzle de la barre. Depuis le Chrome Web Store (sur la page d'une extension, ou son adresse dans Réglages → Extensions), ou reprises du dossier de Chrome, Brave, Edge, Arc, Vivaldi. Il faut macOS 15.4. Jamais dans les fenêtres privées |
+| Extensions | La pièce de puzzle de la barre. Depuis le Chrome Web Store (sur la page d'une extension, ou son adresse dans Réglages → Extensions), ou reprises du dossier de Chrome, Brave, Edge, Arc, Vivaldi. L'épingle d'une ligne du panneau lui donne son propre bouton dans la barre, juste avant la pièce de puzzle (clic droit dessus pour la retirer). Il faut macOS 15.4. Jamais dans les fenêtres privées |
 | Téléchargements | Anneau de progression et vitesse dans la barre, panneau avec barre animée, pause et reprise, quarantaine Gatekeeper, noms nettoyés |
 | Langue | Celle du système, ou français / anglais dans les Réglages, appliqué aussitôt (les textes du système, comme le menu de WebKit, suivent au prochain lancement) |
 | Historique | ⌘Y : recherche, par espace, par jour. Effacer la dernière heure, le dernier jour, les 30 derniers jours, la dernière année ou tout |

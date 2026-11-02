@@ -114,6 +114,8 @@ final class BrowserModel {
     var addressFrame: CGRect { selectedTab.flatMap { tabFrames[$0.id] } ?? .zero }
     @ObservationIgnored var newTabButtonFrame: CGRect = .zero
     @ObservationIgnored var extensionsButtonFrame: CGRect = .zero
+    /// Pinned extensions' buttons, by identifier: their popups hang from them.
+    @ObservationIgnored var pinnedExtensionFrames: [String: CGRect] = [:]
     /// What this window looks like to extensions (see ExtensionHost).
     @ObservationIgnored var extensionAdapter: AnyObject?
 

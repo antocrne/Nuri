@@ -321,6 +321,17 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         return installed.compactMap { record in contexts[record.id].map { (record, $0) } }
     }
 
+    /// The running extensions that have their own button in the bar.
+    var pinned: [(record: InstalledExtension, context: WKWebExtensionContext)] {
+        running.filter { $0.record.pinned == true }
+    }
+
+    func setPinned(_ pinned: Bool, for id: String) {
+        guard let index = installed.firstIndex(where: { $0.id == id }), (installed[index].pinned == true) != pinned else { return }
+        installed[index].pinned = pinned ? true : nil
+        ExtensionFiles.save(installed)
+    }
+
     func icon(of id: String, in browser: BrowserModel?, size: CGFloat) -> NSImage? {
         guard let context = contexts[id] else { return nil }
         let square = CGSize(width: size, height: size)
@@ -581,7 +592,7 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         revision += 1
     }
 
-    /// Its popup hangs from the extensions button.
+    /// Its popup hangs from its own button when it is pinned, else from the extensions button.
     func webExtensionController(_ controller: WKWebExtensionController, presentActionPopup action: WKWebExtension.Action,
                                 for context: WKWebExtensionContext, completionHandler: @escaping ((any Error)?) -> Void) {
         let browser = (action.associatedTab as? ExtensionTab)?.tab?.browser ?? BrowserWindows.shared.normalTarget
@@ -597,7 +608,8 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         if let webView = action.popupWebView {
             ExtensionPopupSizing.prepare(popover, webView: webView, extensionID: context.uniqueIdentifier, screen: browser.window?.screen)
         }
-        let frame = browser.extensionsButtonFrame
+        let own = browser.pinnedExtensionFrames[context.uniqueIdentifier].flatMap { $0.isEmpty ? nil : $0 }
+        let frame = own ?? browser.extensionsButtonFrame
         popover.show(relativeTo: NSRect(x: frame.minX, y: view.bounds.height - frame.maxY, width: frame.width, height: frame.height),
                      of: view, preferredEdge: .minY)
         completionHandler(nil)

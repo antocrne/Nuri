@@ -1277,6 +1277,23 @@ final class FeatureSelfTest {
         host.shownPopover?.performClose(nil)
         await sleep(0.3)
 
+        // Pinned: its own button in the bar, kept in extensions.json, and its popup hangs from it.
+        host.setPinned(true, for: fakeID)
+        check("Extensions : épinglée, gardée", ExtensionFiles.loadRecords().first { $0.id == fakeID }?.pinned == true)
+        let pinnedFrame = await until(3) { !(browser.pinnedExtensionFrames[fakeID] ?? .zero).isEmpty } ? browser.pinnedExtensionFrames[fakeID]! : .zero
+        check("Extensions : épinglée, son bouton avant celui des extensions", !pinnedFrame.isEmpty && pinnedFrame.maxX <= browser.extensionsButtonFrame.minX,
+              "\(NSStringFromRect(pinnedFrame)) · \(NSStringFromRect(browser.extensionsButtonFrame))")
+        await snapshot("extensions-epinglee")
+        snapshot(panel: ExtensionsPanel(close: {}), "extensions-panneau-epinglee")
+        host.performAction(fakeID, in: browser)
+        let hung = await until(12) { host.shownPopover?.isShown == true }
+        let from = host.shownPopover?.positioningRect ?? .zero
+        check("Extensions : épinglée, sa fenêtre part de son bouton", hung && abs(from.midX - pinnedFrame.midX) < 1, "\(NSStringFromRect(from)) · \(NSStringFromRect(pinnedFrame))")
+        host.shownPopover?.performClose(nil)
+        await sleep(0.3)
+        host.setPinned(false, for: fakeID)
+        check("Extensions : désépinglée, plus de bouton", await until(3) { browser.pinnedExtensionFrames[fakeID] == nil } && ExtensionFiles.loadRecords().first { $0.id == fakeID }?.pinned == nil)
+
         // Turned off, it stops.
         host.setEnabled(false, for: fakeID)
         check("Extensions : désactivée, ne tourne plus", !host.running.contains { $0.record.id == fakeID })
@@ -1322,6 +1339,11 @@ final class FeatureSelfTest {
                 note("Store : \(record?.name ?? storeID) — erreurs : \(context?.errors.map(\.localizedDescription).joined(separator: " | ").prefix(260) ?? "")")
                 host.shownPopover?.performClose(nil)
                 await sleep(0.5)
+                // Pinned, its icon as a glyph in the bar.
+                host.setPinned(true, for: storeID)
+                await sleep(0.5)
+                await snapshot("store-epinglee-\(storeID.prefix(6))")
+                host.setPinned(false, for: storeID)
                 browser.close(shown)
             }
             host.remove(storeID)
