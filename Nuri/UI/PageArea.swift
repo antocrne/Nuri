@@ -297,6 +297,8 @@ private struct SplitHandle: View {
 /// attached to the window, stacked underneath the active one, instead of being removed. WebKit
 /// considers a detached web view "not visible" and may pause its video or tear down the PiP
 /// session. Every other tab not on screen is detached, so WebKit throttles it.
+/// Those kept alive are transparent (WebKit doesn't look at the alpha): with no tab shown — a space
+/// with no tab open — one of them would otherwise cover the new tab page, and take its clicks.
 ///
 /// Element fullscreen (a video's fullscreen button): WebKit moves the web view into its own window
 /// and puts a placeholder in its place, which it swaps back on exit. The host doesn't touch its
@@ -327,16 +329,41 @@ final class WebHostView: NSView {
 
     override var isFlipped: Bool { true }
 
-    /// No tab shown: pages kept alive under here don't take the clicks meant for the new tab page.
+    /// Only the pages on screen take clicks: never one kept alive under them (between the two sides
+    /// of a split, or over the new tab page when no tab is shown).
     override func hitTest(_ point: NSPoint) -> NSView? {
-        MainActor.assumeIsolated { browser?.selectedTab == nil } ? nil : super.hitTest(point)
+        guard MainActor.assumeIsolated({ browser?.selectedTab != nil }) else { return nil }
+        let local = superview.map { convert(point, from: $0) } ?? point
+        for view in subviews.reversed() where view.alphaValue > 0 && !view.isHidden {
+            if let hit = view.hitTest(local) { return hit }
+        }
+        return nil
+    }
+
+    /// A page leaving (for the floating player, the Porthole, its sleep) is seen wherever it goes next.
+    override func willRemoveSubview(_ subview: NSView) {
+        super.willRemoveSubview(subview)
+        subview.alphaValue = 1
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil else { return }
+        followMacAppearance()
         sync()
         track()
+    }
+
+    private var appearanceObservation: NSKeyValueObservation?
+
+    /// A private window's chrome is always dark; its pages, as everywhere, follow the Mac's light or
+    /// dark (a site's prefers-color-scheme says what the user chose, not what Nuri wears).
+    private func followMacAppearance() {
+        guard MainActor.assumeIsolated({ browser?.isPrivate == true }), appearanceObservation == nil else { return }
+        appearance = NSApp.effectiveAppearance
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] app, _ in
+            DispatchQueue.main.async { self?.appearance = app.effectiveAppearance }
+        }
     }
 
     /// Re-syncs whenever anything the host depends on changes.
@@ -424,6 +451,11 @@ final class WebHostView: NSView {
         }
         // A page with a docked inspector: WebKit lays out both from the page's new frame.
         for webView in desired { webView.frame = frame(for: webView) }
+        // Only what is shown is seen; the pages kept alive play on, out of sight.
+        for webView in desired {
+            let alpha: CGFloat = shown.contains { $0 === webView } ? 1 : 0
+            for view in withInspector(webView) where view.alphaValue != alpha { view.alphaValue = alpha }
+        }
 
         if active !== currentActive {
             currentActive = active

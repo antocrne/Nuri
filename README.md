@@ -41,7 +41,7 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 |---|---|
 | Pas de compte | Rien à créer, rien n'est envoyé. Le réseau de Nuri lui-même : les versions publiées (mises à jour, désactivable), les taux de la BCE (à la première conversion de devises) et le Chrome Web Store (seulement pour ajouter ou mettre à jour une extension) |
 | Publicités et pisteurs | Bloqués avant chargement. Réglages → Confidentialité, ou le bouclier de la barre d'adresse pour un seul site. Les paramètres de suivi (`utm_*`, `fbclid`…) sont retirés des liens cliqués |
-| Fenêtre privée | ⌘⇧N. Stockage en mémoire, détruit à la fermeture ; rien dans l'historique |
+| Fenêtre privée | ⌘⇧N. Stockage en mémoire, détruit à la fermeture ; rien dans l'historique. Toujours sombre, même quand le Mac est clair ; ses pages suivent le Mac |
 | Favoris et signets | L'étoile de la barre d'adresse ou ⌘D garde la page ; ⌥⌘B les montre. Un favori s'affiche aussi sur la page d'un nouvel onglet. Chaque espace a les siens, et la barre de commande les retrouve |
 | Vue partagée | ⌥⌘S, clic droit sur un onglet, ou glisser un onglet sur la moitié gauche ou droite de la page. Le séparateur se tire (double-clic : moitié-moitié). Pointeur en haut d'une page : une poignée pour échanger les côtés, et son × pour retirer la page. Dans la barre, les deux onglets forment un seul bloc, qui se déplace d'un tenant |
 | Hublot (*Porthole*) | ⌥-clic sur un lien, ou son menu : un aperçu sans quitter la page. Échap le ferme ; il peut devenir un onglet ou passer en vue partagée |
@@ -69,6 +69,7 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 | Historique | ⌘Y : recherche, par espace, par jour. Effacer la dernière heure, le dernier jour, les 30 derniers jours, la dernière année ou tout |
 | Premier lancement | Langue, thème, couleur, transparence, confidentialité, un second espace. Rejouable dans les Réglages |
 | Mises à jour | Au lancement puis toutes les 6 h, désactivable. Rien n'est téléchargé sans accord ; une version n'est installée que si sa signature est celle de Nuri |
+| Passkeys | Pas encore : WebKit ne les accepte, pour n'importe quel site, que d'une app qui a l'autorisation `com.apple.developer.web-browser.public-key-credential`, accordée par Apple sur demande (Firefox l'a). Sans elle, « Se connecter avec une passkey » échoue, Apple compris ; le mot de passe reste possible |
 
 Hors de la 0.1.5 : gestionnaire de mots de passe intégré (ils passent par les extensions), import des favoris et de l'historique d'autres navigateurs.
 

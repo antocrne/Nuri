@@ -30,6 +30,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         // The bar is also the title bar: tabs must never move the window (see TitleBarDragArea).
         window.isMovable = false
         window.acceptsMouseMovedEvents = true
+        // A private window is always dark, whatever the Mac's appearance: its light text stays on
+        // dark glass, tabs, fields and panels included. Its pages keep the Mac's (see WebHostView).
+        if browser.isPrivate { window.appearance = NSAppearance(named: .darkAqua) }
         // Final frame first, *then* the SwiftUI content: a hosting view laid out at one size and
         // then resized by the window before its first layout would "correct" the window in a loop.
         if let saved = browser.frameToReopen {

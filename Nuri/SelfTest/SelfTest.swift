@@ -670,6 +670,32 @@ final class FeatureSelfTest {
         _ = id
         browser.switchSpace(by: -1)
         check("Espaces : ⌃⌘← revient", browser.currentSpace === first)
+
+        // A tab playing in one space, an empty space shown: its page plays on out of sight, and the
+        // new tab page is what's seen and clicked (reported 2026-11-04: tabs "no longer worked").
+        let playing = await htmlTab("<title>Musique</title>m")
+        playing.isAudible = true
+        browser.switchSpace(to: second)
+        await sleep(0.3)
+        let host = playing.webView?.superview as? WebHostView
+        check("Espaces : la page qui joue reste attachée", host != nil && browser.selectedTab == nil)
+        check("Espaces : elle ne couvre pas la page de nouvel onglet", playing.webView?.alphaValue == 0)
+        if let host, let window = host.window {
+            let middle = host.convert(NSPoint(x: host.bounds.midX, y: host.bounds.midY), to: nil)
+            let hit = window.contentView?.hitTest(window.contentView!.convert(middle, from: nil))
+            check("Espaces : ni ses clics", hit.map { !$0.isDescendant(of: host) } ?? true, String(describing: hit))
+        }
+        browser.showCommandBar(.newTab)
+        await sleep(0.5)
+        check("Espaces : ⌘T y donne le champ de la page", (browser.window?.firstResponder as? NSTextView)?.isFieldEditor == true)
+        browser.navigate("https://nuri-selftest.example/vide", mode: .newTab)
+        await sleep(0.3)
+        check("Espaces : un onglet s'y ouvre et se voit", browser.selectedTab?.space === second && browser.selectedTab?.webView?.alphaValue == 1)
+        browser.switchSpace(to: first)
+        await sleep(0.3)
+        check("Espaces : de retour, la page qui joue se voit", playing.webView?.alphaValue == 1 && browser.selectedTab === playing)
+        playing.isAudible = false
+        browser.close(playing)
         browser.deleteSpace(second)
         check("Espaces : supprimer retire son historique", HistoryStore.shared.search("secret-travail", space: nil).isEmpty && browser.spaces.count == 1)
     }
@@ -981,6 +1007,24 @@ final class FeatureSelfTest {
             check("Privé : ses visites ne sont pas écrites", !delegate && HistoryStore.shared.search("nuri-prive", space: nil).isEmpty, url.absoluteString)
         }
         check("Privé : pas de dossier", model.addFolder() == nil)
+        // Its light text on what it sits on, whatever the Mac's appearance (reported 2026-11-04:
+        // unreadable in light mode, the active tab and the field near white on white).
+        if let window = model.window {
+            check("Privé : la fenêtre est sombre", window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+            var ratios: [CGFloat] = []
+            window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                let frame = Theme.privateFrameNS
+                let text = NSColor(Theme.privateText)
+                for fill in [Theme.selected, Theme.control, Theme.card] {
+                    let over = NSColor(fill).usingColorSpace(.sRGB)!
+                    let blended = frame.usingColorSpace(.sRGB)!.blended(withFraction: over.alphaComponent, of: over.withAlphaComponent(1))!
+                    ratios.append(contrast(text, blended))
+                }
+            }
+            check("Privé : texte lisible sur l'onglet actif, les champs et les cartes", ratios.allSatisfy { $0 >= 4.5 }, ratios.map { String(format: "%.1f", $0) }.joined(separator: " "))
+            let pageAppearance = tab.webView?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+            check("Privé : les pages suivent le Mac", pageAppearance == NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]))
+        }
         await snapshot("prive", window: model.window)
         weak var weakModel = model
         model.window?.close()

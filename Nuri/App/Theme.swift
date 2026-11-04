@@ -77,8 +77,9 @@ enum Theme {
 
     /// The warm veil over the blurred desktop.
     static let frameNS = NSColor.nuriDynamic(light: NSColor(hex: 0xF7EDE1), dark: NSColor(hex: 0x2B2420))
-    /// Private windows: the same glass, cooler and darker, so there is no mistaking them.
-    static let privateFrameNS = NSColor.nuriDynamic(light: NSColor(hex: 0x6A6072), dark: NSColor(hex: 0x262230))
+    /// Private windows: the same glass, cooler and darker, so there is no mistaking them. Always the
+    /// dark one: their window is dark whatever the Mac's appearance (BrowserWindowController).
+    static let privateFrameNS = NSColor(hex: 0x262230)
     static let privateText = Color(nsColor: NSColor(hex: 0xF1ECF5))
 
     /// What sits on the frame: tabs, buttons, fields.
