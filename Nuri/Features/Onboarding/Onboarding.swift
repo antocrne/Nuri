@@ -62,7 +62,7 @@ struct OnboardingOverlay: View {
             Toggle(L("Halos de couleur doux", "Soft color glows"), isOn: $settings.softGlows)
         case 2:
             heading(L("Votre vie privée", "Your privacy"), L("Vous pourrez tout changer dans les Réglages.", "You can change all of it in Settings."))
-            Toggle(L("Bloquer les publicités et les pisteurs", "Block ads and trackers"), isOn: $settings.adBlockEnabled)
+            Toggle(L("Bloquer les pisteurs et les principales régies publicitaires", "Block trackers and the main ad networks"), isOn: $settings.adBlockEnabled)
             Picker(L("Moteur de recherche", "Search engine"), selection: $settings.searchEngine) {
                 ForEach(SearchEngine.allCases.filter { $0 != .custom }) { Text($0.name).tag($0) }
             }

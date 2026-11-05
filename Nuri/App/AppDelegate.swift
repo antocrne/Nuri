@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !selfTest {
             BrowserWindows.shared.reopenSavedWindows()
             Updater.shared.start()
+            CrashJournal.shared.start()
             // First launch: let the user choose how Nuri looks (Settings can replay it).
             if !AppSettings.shared.onboardingCompleted { BrowserModel.shared.onboardingStep = 0 }
             if LaunchGuard.previousLaunchDied {
@@ -108,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         BrowserModel.shared.saveNow()
+        DownloadManager.shared.saveNow()
         if let frame = BrowserModel.shared.window?.frame {
             UserDefaults.standard.set(NSStringFromRect(frame), forKey: "mainWindowFrame")
         }

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 enum SettingsPane: String, CaseIterable, Identifiable {
@@ -178,6 +179,7 @@ private struct GeneralPane: View {
             Toggle(L("Réunion en fenêtre flottante en quittant son onglet", "Meeting in a floating window when leaving its tab"), isOn: $settings.autoMeetingPiP)
             Toggle(L("Empêcher la lecture automatique avec le son", "Block autoplay with sound"), isOn: $settings.blockAutoplayWithSound)
         }
+        ImportExportGroup()
         Button(L("Revoir la personnalisation du premier lancement…", "Replay First-Launch Personalization…")) {
             BrowserWindows.shared.showMainWindow()
             BrowserModel.shared.onboardingStep = 0
@@ -190,6 +192,69 @@ private struct GeneralPane: View {
         Task {
             try? await NSWorkspace.shared.setDefaultApplication(at: app, toOpenURLsWithScheme: "http")
             try? await NSWorkspace.shared.setDefaultApplication(at: app, toOpenURLsWithScheme: "https")
+        }
+    }
+}
+
+/// Bookmarks and history from another browser, into the current space; its bookmarks out, as the
+/// HTML file every browser reads.
+private struct ImportExportGroup: View {
+    @State private var sources = BrowserImport.sources()
+    @State private var bookmarks = true
+    @State private var history = true
+    @State private var working = false
+    @State private var result: String?
+
+    var body: some View {
+        let space = BrowserModel.shared.currentSpace
+        SettingsGroup(title: L("Importer et exporter", "Import and export")) {
+            HStack(spacing: 14) {
+                Toggle(L("Favoris et signets", "Bookmarks"), isOn: $bookmarks)
+                Toggle(L("Historique", "History"), isOn: $history)
+            }
+            ForEach(sources) { source in
+                HStack {
+                    Text(source.name).font(.system(size: 12.5))
+                    Spacer()
+                    Button(L("Importer", "Import")) { run(source) }
+                        .controlSize(.small)
+                        .disabled(working || !(bookmarks && source.bookmarks != nil || history && source.history != nil))
+                }
+            }
+            HStack {
+                Button(L("Importer un fichier de favoris (HTML)…", "Import a Bookmarks File (HTML)…")) { importFile() }.disabled(working)
+                Button(L("Exporter les signets…", "Export Bookmarks…")) { BrowserImport.exportWithPanel(space: space) }
+            }
+            if let result { Note(result) }
+            Note(L("Dans l'espace « \(space.name) ». Les dossiers des autres navigateurs ne sont pas gardés ; ni mots de passe ni cookies ne sont lus.",
+                   "Into the space “\(space.name)”. Other browsers' folders aren't kept; no passwords or cookies are read."))
+        }
+        .onAppear { sources = BrowserImport.sources() }
+    }
+
+    private func run(_ source: ImportSource) {
+        let space = BrowserModel.shared.currentSpace
+        working = true
+        result = nil
+        Task {
+            let outcome = await BrowserImport.run(source, bookmarks: bookmarks, history: history, into: space.id)
+            working = false
+            switch outcome {
+            case .success(let added): result = BrowserImport.summary(added, space: space.name)
+            case .failure(let failure): result = failure.message
+            }
+        }
+    }
+
+    private func importFile() {
+        let space = BrowserModel.shared.currentSpace
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.html]
+        panel.prompt = L("Importer", "Import")
+        guard panel.runModal() == .OK, let file = panel.url else { return }
+        switch BrowserImport.runFile(file, into: space.id) {
+        case .success(let added): result = BrowserImport.summary(added, space: space.name)
+        case .failure(let failure): result = failure.message
         }
     }
 }
@@ -228,10 +293,9 @@ private struct PrivacyPane: View {
     var body: some View {
         @Bindable var settings = settings
         SettingsGroup(title: L("Publicités et pisteurs", "Ads and trackers")) {
-            Toggle(L("Bloquer les publicités et les pisteurs", "Block ads and trackers"), isOn: $settings.adBlockEnabled)
+            Toggle(L("Bloquer les pisteurs et les principales régies publicitaires", "Block trackers and the main ad networks"), isOn: $settings.adBlockEnabled)
             Toggle(L("Retirer les paramètres de pistage des liens (utm, fbclid…)", "Strip tracking parameters from links (utm, fbclid…)"), isOn: $settings.stripTrackingParameters)
-            Note(L("Le blocage se fait avant le chargement, sans script. Pour un seul site : le bouclier dans la barre d'adresse.",
-                   "Blocking happens before loading, without any script. For a single site: the shield in the address bar."))
+            Note(AdBlockList.scopeNote)
             if !settings.adBlockAllowlist.isEmpty {
                 Text(L("Bloqueur coupé sur :", "Blocker off for:")).font(.system(size: 12, weight: .medium))
                 ForEach(settings.adBlockAllowlist, id: \.self) { host in
@@ -254,6 +318,7 @@ private struct PrivacyPane: View {
         let lists = [(L("Notifications autorisées", "Notifications allowed"), WebNotifications.allowedSites),
                      (L("Notifications refusées", "Notifications denied"), WebNotifications.refusedSites),
                      (L("Fenêtres sans clic autorisées", "Windows without a click allowed"), PopupPermission.allowedSites)]
+            + MediaPermission.lists.map { ($0.title, $0.list) }
         if lists.contains(where: { !$0.1.hosts.isEmpty }) {
             SettingsGroup(title: L("Autorisations des sites", "Site permissions")) {
                 ForEach(lists.filter { !$0.1.hosts.isEmpty }, id: \.0) { title, list in
@@ -277,6 +342,7 @@ private struct PrivacyPane: View {
                    "Each space keeps its cookies and sign-ins apart. Nothing is sent anywhere: no account, no analytics."))
             Button(erasedSites ? L("Effacé", "Erased") : L("Effacer cookies et données de l'espace actuel…", "Erase Cookies and Data of the Current Space…")) { eraseSiteData() }
                 .disabled(erasedSites)
+            SiteDataList(space: BrowserModel.shared.currentSpace)
         }
     }
 
@@ -290,6 +356,52 @@ private struct PrivacyPane: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         space.dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
         erasedSites = true
+    }
+}
+
+/// The sites that keep something in a space (cookies, storage, cache…), each erased on its own.
+private struct SiteDataList: View {
+    let space: Space
+    @State private var sites: [SiteData.Site]?
+    @State private var filter = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let sites {
+                let shown = filter.isEmpty ? sites : sites.filter { $0.name.localizedCaseInsensitiveContains(filter) }
+                HStack {
+                    Text(L("\(sites.count) sites ont des données dans « \(space.name) »", "\(sites.count) sites have data in “\(space.name)”"))
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    if sites.count > 8 {
+                        TextField(L("Filtrer", "Filter"), text: $filter).textFieldStyle(.roundedBorder).frame(width: 160).controlSize(.small)
+                    }
+                }
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(shown) { site in
+                            HStack {
+                                Text(site.name).font(.system(size: 12))
+                                Text(site.kinds).font(.system(size: 11)).foregroundStyle(Theme.faintText).lineLimit(1)
+                                Spacer()
+                                Button(L("Effacer", "Erase")) {
+                                    Task {
+                                        await SiteData.remove(site, from: space.dataStore)
+                                        self.sites = await SiteData.sites(in: space.dataStore)
+                                    }
+                                }
+                                .controlSize(.small)
+                            }
+                            .frame(height: 26)
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+            } else {
+                Text(L("Recherche des sites qui ont des données…", "Looking for sites with data…")).font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
+            }
+        }
+        .task(id: space.id) { sites = await SiteData.sites(in: space.dataStore) }
     }
 }
 

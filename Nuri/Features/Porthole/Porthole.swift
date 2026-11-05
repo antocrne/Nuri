@@ -103,7 +103,12 @@ struct PortholeOverlay: View {
                     header
                     ZStack {
                         PortholeWebHost(tab: tab)
-                        if let page = tab.insecurePage { InsecurePageView(tab: tab, page: page) }
+                        if let page = tab.insecurePage {
+                            InsecurePageView(tab: tab, page: page)
+                        } else if let error = tab.loadError {
+                            // A glance that fails says so, and can try again, as a tab does.
+                            LoadErrorView(tab: tab, message: error)
+                        }
                     }
                 }
                 .frame(width: min(geometry.size.width - 48, max(520, geometry.size.width * 0.74)),

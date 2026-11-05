@@ -69,6 +69,11 @@ final class BrowserModel {
     var isPrivate: Bool { kind == .privateWindow }
     /// Plain HTTP sites accepted in this private window, gone with it (PlainHTTP).
     @ObservationIgnored var acceptedHTTPHosts: Set<String> = []
+    /// Expired certificates accepted in this private window, gone with it (CertificateExceptions).
+    @ObservationIgnored var acceptedCertificates: [String: String] = [:]
+    /// Sites that said in this private window that they require HTTPS (StrictTransport).
+    @ObservationIgnored var strictTransportHosts: Set<String> = []
+    @ObservationIgnored var strictTransportSubdomains: Set<String> = []
     var managesSpaces: Bool { kind == .main }
 
     var spaces: [Space] = [] {
@@ -78,8 +83,14 @@ final class BrowserModel {
 
     var commandBar: CommandBarRequest?
     @ObservationIgnored private var commandBarOpenedAt = Date.distantPast
-    var findBarVisible = false
+    var findBarVisible = false {
+        didSet { if !findBarVisible { findResult = nil } }
+    }
     @ObservationIgnored var lastFindText = ""
+    /// What the last search in the page found.
+    var findResult: FindResult?
+    /// Bumped to put the keyboard in the find bar's field (⌘F, even with the bar already out).
+    var findFieldFocus = 0
     var toast: Toast?
     /// The downloads panel, next to its button (⌥⌘L).
     var showingDownloads = false
@@ -475,6 +486,16 @@ final class BrowserModel {
     }
 
     func navigate(_ input: String, mode: CommandBarMode) {
+        // "view-source:…": the page opens in a new tab, which then shows its source.
+        if let page = URLResolver.viewSourceTarget(input) {
+            showSource(of: page)
+            return
+        }
+        // "mailto:…", "tel:…": the Mac's app for it, and the tab stays where it is.
+        if let url = URLResolver.url(from: input), URLResolver.externalSchemes.contains(url.scheme?.lowercased() ?? "") {
+            NSWorkspace.shared.open(url)
+            return
+        }
         if let url = URLResolver.url(from: input) {
             open(url, mode: mode)
             if URLResolver.isTypedWithoutScheme(input) {

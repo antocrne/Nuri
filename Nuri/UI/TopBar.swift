@@ -105,7 +105,7 @@ struct TabAddress: View {
 
     private func icon(_ tab: Tab) -> String {
         guard let url = tab.url else { return "magnifyingglass" }
-        if url.scheme == "https", tab.hasOnlySecureContent, !CertificateExceptions.isExcepted(url.host()) { return "lock.fill" }
+        if url.scheme == "https", tab.hasOnlySecureContent, !CertificateExceptions.isExcepted(url.host(), in: browser) { return "lock.fill" }
         return url.scheme == "https" || url.scheme == "http" ? "lock.open" : "globe"
     }
 
@@ -126,7 +126,7 @@ struct TabAddress: View {
             let host = tab.url?.host()
             ChromeButton(symbol: settings.isAdBlockActive(on: host) ? "shield.lefthalf.filled" : "shield.slash",
                          help: settings.adBlockEnabled
-                            ? (settings.isAdBlockActive(on: host) ? L("Publicités et pisteurs bloqués : couper pour ce site", "Ads and trackers blocked: turn off for this site")
+                            ? (settings.isAdBlockActive(on: host) ? L("Pisteurs et régies connues bloqués : couper pour ce site", "Known trackers and ad networks blocked: turn off for this site")
                                                                   : L("Bloqueur coupé sur ce site : le remettre", "Blocker off for this site: turn back on"))
                             : L("Bloqueur désactivé dans les Réglages", "Blocker turned off in Settings"),
                          size: 24, iconSize: 11, isEnabled: settings.adBlockEnabled) { browser.toggleAdBlockForCurrentSite() }

@@ -30,9 +30,10 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 ## Ce qui rend Nuri léger
 
 - Une seule vue web est créée au lancement : celle de l'onglet affiché. Les autres dorment jusqu'au clic.
-- Les onglets inactifs se mettent en veille après 30 min (5 min si la mémoire baisse, tout de suite si elle est critique). Ils gardent leur place, leur historique et leur défilement. Restent éveillés ceux qui jouent du son, sont en appel, contiennent du texte saisi ou sont en mode lecture.
+- Les onglets inactifs se mettent en veille après 30 min (5 min si la mémoire baisse, tout de suite si elle est critique). Ils gardent leur place, leur historique et leur défilement. Restent éveillés ceux qui jouent du son, sont en appel, contiennent du texte saisi ou sont en mode lecture, et ceux qu'une page a ouverts tant qu'ils lui parlent encore (`window.opener`).
+- Les vidéos ne se lancent pas avec le son toutes seules (désactivable dans Réglages → Général).
 - Un onglet qui n'est pas à l'écran est retiré de la fenêtre, et WebKit le ralentit.
-- Le bloqueur est une liste compilée une fois par WebKit : aucun script par page.
+- Le bloqueur est une liste compilée une fois par WebKit : aucun script par page. Elle est courte (environ 170 régies et pisteurs parmi les plus répandus) : bien des publicités passent quand même, une extension comme uBlock Origin Lite va plus loin.
 - Rien ne tourne en continu : un seul minuteur (une fois par minute, pour la veille), aucune animation permanente, un fond dessiné une fois.
 
 ## Fonctionnalités
@@ -40,7 +41,7 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 | Quoi | Comment |
 |---|---|
 | Pas de compte | Rien à créer, rien n'est envoyé. Le réseau de Nuri lui-même : les versions publiées (mises à jour, désactivable), les taux de la BCE (à la première conversion de devises) et le Chrome Web Store (seulement pour ajouter ou mettre à jour une extension) |
-| Publicités et pisteurs | Bloqués avant chargement. Réglages → Confidentialité, ou le bouclier de la barre d'adresse pour un seul site. Les paramètres de suivi (`utm_*`, `fbclid`…) sont retirés des liens cliqués |
+| Pisteurs et régies | Les plus répandus, bloqués avant chargement (une liste courte, pas EasyList). Réglages → Confidentialité, ou le bouclier de la barre d'adresse pour un seul site. Les paramètres de suivi (`utm_*`, `fbclid`…) sont retirés des liens cliqués. Les icônes des sites passent par la page elle-même (WebKit, son bloqueur, son nom de Safari) ; une fenêtre privée n'en demande aucune |
 | Fenêtre privée | ⌘⇧N. Stockage en mémoire, détruit à la fermeture ; rien dans l'historique. Toujours sombre, même quand le Mac est clair ; ses pages suivent le Mac |
 | Favoris et signets | L'étoile de la barre d'adresse ou ⌘D garde la page ; ⌥⌘B les montre. Un favori s'affiche aussi sur la page d'un nouvel onglet. Chaque espace a les siens, et la barre de commande les retrouve |
 | Vue partagée | ⌥⌘S, clic droit sur un onglet, ou glisser un onglet sur la moitié gauche ou droite de la page. Le séparateur se tire (double-clic : moitié-moitié). Pointeur en haut d'une page : une poignée pour échanger les côtés, et son × pour retirer la page. Dans la barre, les deux onglets forment un seul bloc, qui se déplace d'un tenant |
@@ -50,28 +51,34 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 | Onglets | S'ouvrent au relâchement du clic. Se déplacent au glisser-déposer. Clic milieu pour fermer. L'onglet actif est la barre d'adresse : il s'étire, et un clic édite l'adresse |
 | Barre masquée | ⌃⌘B : elle revient quand le pointeur touche le bord haut, et on peut en glisser un onglet |
 | Raccourcis | Réglages → Raccourcis (modifiables), ou taper « raccourcis » / « shortcuts » dans la barre de commande |
-| Barre de commande | ⌘T au milieu de la fenêtre, ⌘L dans la barre d'adresse qui s'étend : adresse, recherche, onglets ouverts, historique de l'espace, commandes de Nuri |
+| Barre de commande | ⌘T au milieu de la fenêtre, ⌘L dans la barre d'adresse qui s'étend : adresse, recherche, onglets ouverts, historique de l'espace, commandes de Nuri. L'adresse se complète en tapant, depuis les favoris et l'historique (« git » → github.com, la suite sélectionnée). Une adresse avec un chemin qui ne répond pas affiche son erreur ; seul un nom seul (« node.js ») devient une recherche. `mailto:`, IPv6, « intranet/ » sont des adresses |
 | Calculs et conversions | Dans la barre de commande : `12*4+3`, `20 % de 150`, `10 km en miles`, `100 usd en eur` |
 | Dossiers d'onglets | À côté du point de l'espace. Clic droit sur un onglet, ou le glisser sur un dossier. Un onglet rangé s'endort, un clic le réveille ; il ne se ferme que si on le demande. Clic droit sur le dossier : son nom, son icône et sa couleur, qui devient son fond |
+| Certificats | Un certificat expiré (ou pas encore valable) d'un site d'Internet : un « Continuer quand même » discret, pour ce certificat et jusqu'à ce que Nuri quitte, jamais retenu ; rien pour un site qui exige HTTPS (HSTS : domaines préchargés, ou dit par le site). Un appareil du réseau local : « Continuer vers… », retenu pour ce certificat |
 | Pages sans HTTPS | Une page servie en HTTP depuis Internet attend une réponse : Retour, ou Continuer vers le site HTTP (retenu jusqu'à ce que Nuri quitte, ou que la fenêtre privée se ferme). Une adresse qui redirige vers HTTPS passe sans question, comme le réseau local |
 | Fenêtres sans clic | Bloquées (WebKit seul le ferait sans un mot) : une pastille au-dessus de la page propose d'ouvrir, ou d'autoriser le site. Réglages → Confidentialité pour revenir sur un choix |
 | Notifications des sites | Une pastille demande, une fois par site, et macOS les affiche avec le nom du site ; un clic ramène à l'onglet. Pas de Web Push (rien n'arrive quand le site n'est pas ouvert), jamais dans les fenêtres privées |
-| Imprimer | ⌘P, et les boutons « Imprimer » des pages (`window.print()`) |
+| Imprimer, enregistrer, ouvrir | ⌘P, et les boutons « Imprimer » des pages (`window.print()`). ⌘S enregistre la page (archive web ou PDF), ⌘O ouvre un fichier du Mac. ⌥⌘U, ou `view-source:` devant une adresse : la source de la page, telle que le serveur l'envoie |
+| Liens | Au survol, l'adresse s'affiche en bas de la page. Un lien glissé sur la barre d'onglets s'ouvre dans un onglet. Les boutons latéraux de la souris font Précédent et Suivant. « Réessayer » sur une page en échec redemande le lien qui a échoué |
+| Caméra, micro, position | Demandés une fois par site et retenus (refus compris) ; Réglages → Confidentialité les liste et les retire. Une fenêtre privée garde les siens jusqu'à sa fermeture. Les deux côtés d'une vue partagée peuvent les demander |
 | Nouveaux onglets | ⌘-clic, clic milieu, `target=_blank`, menu du lien (nouvel onglet, hublot, vue partagée, fenêtre privée) : un seul onglet à chaque fois |
 | Mode lecture | ⌘⇧R : article et images (même chargées tardivement), sans JavaScript, taille du texte réglable |
 | Picture in Picture | ⌘⇧P, et automatique en quittant un onglet qui joue |
 | Réunion flottante | Pendant un appel, quitter l'onglet place la page entière dans une petite fenêtre au-dessus des apps, dézoomée à 75 % ; elle revient au retour, par son bouton, ou en raccrochant |
-| Partage d'écran | La question « Partager votre écran ? » propose une seule fenêtre ou l'écran entier, puis macOS laisse choisir laquelle. « Partager aussi le son » : les autres apps et les autres onglets, jamais l'appel |
+| Partage d'écran | La question « Partager votre écran ? » propose une seule fenêtre ou l'écran entier, puis macOS laisse choisir laquelle. « Partager aussi le son » : les autres apps et les autres onglets, jamais l'appel. Proposé à une page qui a demandé la caméra ou le micro (un appel) : seule celle-là reçoit le script qui ajoute le son, invisible des autres sites |
 | Fermer | ⌥⌘W tous ; clic droit sur un onglet : tous sauf celui-ci. Les onglets des dossiers restent. ⌘⇧T rouvre |
 | Extensions | La pièce de puzzle de la barre. Depuis le Chrome Web Store (sur la page d'une extension, ou son adresse dans Réglages → Extensions), ou reprises du dossier de Chrome, Brave, Edge, Arc, Vivaldi. L'épingle d'une ligne du panneau lui donne son propre bouton dans la barre, juste avant la pièce de puzzle (clic droit dessus pour la retirer). Il faut macOS 15.4. Jamais dans les fenêtres privées. Un VPN (Proton VPN…) demande la première fois de faire passer la navigation par ses serveurs, ce qui se change dans Réglages → Extensions → VPN |
-| Téléchargements | Anneau de progression et vitesse dans la barre, panneau avec barre animée, pause et reprise, quarantaine Gatekeeper, noms nettoyés |
+| Téléchargements | Anneau de progression et vitesse dans la barre, panneau avec barre animée, pause et reprise, quarantaine Gatekeeper, noms nettoyés. La liste reste d'un lancement à l'autre (jamais celle des fenêtres privées) |
+| Recherche dans la page | ⌘F (même barre déjà ouverte), le nombre de résultats ou « aucun résultat », ↩ et ⇧↩ pour aller et revenir |
 | Langue | Celle du système, ou français / anglais dans les Réglages, appliqué aussitôt (les textes du système, comme le menu de WebKit, suivent au prochain lancement) |
-| Historique | ⌘Y : recherche, par espace, par jour. Effacer la dernière heure, le dernier jour, les 30 derniers jours, la dernière année ou tout |
+| Importer, exporter | Réglages → Général, ou Fichier : favoris et historique de Safari, Chrome, Brave, Edge, Arc, Vivaldi et Firefox, ou un fichier de favoris HTML (celui qu'exporte chaque navigateur), dans l'espace actuel. Sans doublon ; les dossiers ne sont pas gardés. Safari demande l'accès complet au disque (sinon : exporter ses favoris en HTML). Les signets de l'espace s'exportent dans ce même format |
+| Historique | ⌘Y : recherche, par espace, par jour, 500 lignes à la fois. Effacer la dernière heure, le dernier jour, les 30 derniers jours, la dernière année ou tout |
+| Données des sites | Réglages → Confidentialité : les sites qui gardent quelque chose dans l'espace (cookies, stockage, cache), chacun s'efface seul |
 | Premier lancement | Langue, thème, couleur, transparence, confidentialité, un second espace. Rejouable dans les Réglages |
 | Mises à jour | Au lancement puis toutes les 6 h, désactivable. Rien n'est téléchargé sans accord ; une version n'est installée que si sa signature est celle de Nuri |
 | Passkeys | Pas encore : WebKit ne les accepte, pour n'importe quel site, que d'une app qui a l'autorisation `com.apple.developer.web-browser.public-key-credential`, accordée par Apple sur demande (Firefox l'a). Sans elle, « Se connecter avec une passkey » échoue, Apple compris ; le mot de passe reste possible |
 
-Hors de la 0.1.5 : gestionnaire de mots de passe intégré (ils passent par les extensions), import des favoris et de l'historique d'autres navigateurs.
+Hors de la 0.1.5 : gestionnaire de mots de passe intégré (ils passent par les extensions).
 
 Extensions essayées (`-NuriSelfTestOnly extensions -NuriSelfTestStore id,id`) : Dark Reader, uBlock Origin Lite, SponsorBlock, Grammarly, Proton Pass et Bitwarden ouvrent leur fenêtre ; 1Password ouvre sa page d'accueil dans un onglet (sa fenêtre vient une fois un compte ajouté) ; Return YouTube Dislike se charge. Proton Pass a été essayé avec un vrai compte (0.1.3) ; pour Bitwarden et 1Password, connexion et remplissage restent à essayer.
 Ce qui rapproche WebKit de Chrome, repris de Void : la copie d'une extension gardée par Nuri reçoit `extension-shim.js`, exécuté en premier dans son arrière-plan, ses pages, ses scripts de contenu et les scripts qu'elle injecte. Il garde à WebKit ses objets `chrome` et `browser` (Proton Pass les remplace, et WebKit ne pouvait plus rien lui transmettre), fournit des substituts aux API absentes et `requestIdleCallback`, et répond comme Chrome à `tabs.getCurrent()` dans un popup. WebKit perd aussi le service worker d'une extension chargée au lancement, quelques secondes plus tard : Nuri l'interroge, et appelle `runtime.reload()` s'il ne répond plus (`-NuriSelfTestOnly lancement -NuriSelfTestDir dossier`, deux fois de suite, le montre). Les fenêtres des extensions sont redimensionnables, par le coin en bas à droite. Les mises à jour : une fois par jour, désactivable, ou à la demande dans les Réglages.
@@ -111,7 +118,23 @@ Compilés en Debug seulement. Ils travaillent dans un dossier temporaire et ne t
 ~/Library/Developer/Xcode/DerivedData/Nuri-cli/Build/Products/Debug/Nuri.app/Contents/MacOS/Nuri -NuriSelfTest features -NuriSelfTestOut /tmp/nuri.md
 ```
 
-`-NuriSelfTestOnly split,hublot` limite à certaines sections : `session, onglets, porter, glisser, liens, split, hublot, espaces, dossiers, adresse, menus, fermer, son, veille, prive, calcul, commandes, focus, extensions, lancement, vpn, lecture, historique, signets, telechargements, pistage, permissions, http, bloqueur, langue, raccourcis, barre, mise-a-jour, reunion, partage-son, pip, apercu`.
+`-NuriSelfTestOnly split,hublot` limite à certaines sections : `session, onglets, porter, glisser, liens, split, hublot, espaces, dossiers, adresse, menus, fermer, son, veille, prive, calcul, commandes, focus, extensions, lancement, vpn, lecture, historique, signets, telechargements, pistage, permissions, http, bloqueur, langue, raccourcis, barre, mise-a-jour, reunion, partage-son, pip, apercu, import, audit, certificat, mineurs`. `certificat` a besoin du réseau (badssl.com).
+
+## Journal
+
+Les erreurs importantes (pages en échec, processus d'une page arrêté, session, favoris ou liste des téléchargements illisibles, bloqueur refusé par WebKit, mises à jour) vont au journal unifié de macOS, sans les adresses en clair :
+
+```bash
+/usr/bin/log show --last 1h --predicate 'subsystem == "app.nuri.browser"'
+```
+
+Les plantages et blocages que macOS rapporte au lancement suivant (MetricKit) y sont notés, et les 20 derniers rapports gardés dans `~/Library/Application Support/Nuri/Crashes/`. Rien ne quitte le Mac.
+
+Pour tout lancer d'un coup, à part (son propre dossier, ses propres réglages), et échouer si un test échoue, ce que fait aussi `.github/workflows/selftest.yml` à chaque envoi :
+
+```bash
+./scripts/selftest.sh
+```
 
 Le rapport compte les tests réussis, échoués et **non vérifiés** : des clics simulés se perdent quand une autre app est au premier plan, ce qui ne dit rien de Nuri. Pour tout vérifier, lancer les tests et laisser Nuri devant, sans toucher à la souris. Le contenu d'un menu ne dit pas ce qui s'affiche (le menu de WebKit ignore l'image de ses éléments) : `-NuriSelfTestOnly menus -NuriSelfTestHoldMenu 30` le garde ouvert pour le regarder. `pip`, `http`, `bloqueur` et `extensions` ont besoin du réseau. `attente -NuriSelfTestHold 45` garde une page ouverte pour essayer avec le vrai pointeur et le vrai clavier, ce qu'aucun événement simulé ne remplace : le bug du + n'apparaissait qu'ainsi, et seulement une fois un client d'accessibilité passé sur l'app (`app_screenshot`, Raycast…). `reunion` simule un appel et `partage-son` un écran : aucun vrai appel Meet, Teams ou Zoom n'est passé, et le son des autres apps n'est pas testé (macOS demanderait l'autorisation).
 
@@ -123,4 +146,13 @@ Changer `MARKETING_VERSION` dans `project.yml`, puis :
 ./scripts/release.sh notes.md
 ```
 
-Il faut d'abord créer le dépôt GitHub indiqué dans `Updater.repository` : tant qu'il n'existe pas, Nuri ne trouve aucune version. Pour distribuer l'app à d'autres Mac, il faudra une signature *Developer ID* et la notarisation.
+Le script signe l'app avec un certificat *Developer ID Application* de l'équipe, la fait notariser par Apple, agrafe le ticket et vérifie ce que Gatekeeper en dira (`spctl`) avant de publier : sans cela, un autre Mac refuse d'ouvrir Nuri. Il faut une fois :
+
+- le certificat *Developer ID Application* dans le trousseau (Xcode → Réglages → Comptes → Gérer les certificats → +) ;
+- le mot de passe du service de notarisation, gardé dans le trousseau (un mot de passe d'app d'appleid.apple.com) :
+
+```bash
+xcrun notarytool store-credentials nuri-notary --apple-id <identifiant> --team-id Y35975BXD4
+```
+
+`NURI_RELEASE_DRY_RUN=1` fait tout sauf publier. Le programme de mise à jour accepte une version signée Developer ID par la même équipe : les Nuri déjà installés la prennent.

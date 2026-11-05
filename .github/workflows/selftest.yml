@@ -1,0 +1,23 @@
+# Nuri's self-tests at each push and pull request, on a Mac runner (it has a window server, which
+# the tests need: they drive the real window).
+name: Auto-tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  selftest:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Auto-tests
+        env:
+          NURI_SELFTEST_ADHOC: "1"
+        run: scripts/selftest.sh "" "$RUNNER_TEMP/rapport.md"
+      - name: Rapport
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapport-auto-tests
+          path: ${{ runner.temp }}/rapport*

@@ -51,6 +51,33 @@ final class HistoryStore {
         revision += 1
     }
 
+    /// Another browser's history (BrowserImport), in one transaction. A page already here keeps the
+    /// larger count and the latest visit; pages older than the period kept are left out. Returns how
+    /// many pages were new.
+    @discardableResult
+    func importVisits(_ visits: [ImportedVisit], space: UUID) -> Int {
+        guard let db, !visits.isEmpty else { return 0 }
+        let cutoff = Date().addingTimeInterval(-Double(AppSettings.shared.historyRetention.rawValue) * 86_400)
+        let before = count(space: space)
+        db.transaction {
+            for visit in visits where visit.last >= cutoff {
+                db.execute("""
+                INSERT INTO history(url, space, title, visits, last) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(url, space) DO UPDATE SET visits = MAX(visits, excluded.visits), last = MAX(last, excluded.last),
+                    title = CASE WHEN title = '' THEN excluded.title ELSE title END
+                """, [visit.url.absoluteString, space.uuidString, visit.title, visit.visits, min(visit.last, Date()).timeIntervalSince1970])
+            }
+            return true
+        }
+        revision += 1
+        return count(space: space) - before
+    }
+
+    /// Pages of one space.
+    func count(space: UUID) -> Int {
+        Int(db?.string("SELECT COUNT(*) FROM history WHERE space = ?", [space.uuidString]) ?? "0") ?? 0
+    }
+
     /// Last title written per URL: pages that animate their title (unread counters, tickers)
     /// would otherwise write to disk continuously.
     @ObservationIgnored private var writtenTitles: [String: String] = [:]

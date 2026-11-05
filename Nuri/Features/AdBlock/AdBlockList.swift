@@ -54,6 +54,20 @@ enum AdBlockList {
         "[id^='taboola-']", ".trc_related_container", ".OUTBRAIN", ".ob-widget",
     ]
 
+    private static let domainSet = Set(domains)
+
+    /// What the switch does, said as it is: a short list, not EasyList.
+    @MainActor static var scopeNote: String {
+        L("Une liste courte, compilée par WebKit et appliquée avant le chargement, sans script : \(domainSet.count) régies et pisteurs parmi les plus répandus, et quelques emplacements de publicité. Bien des publicités passent quand même ; pour aller plus loin, une extension comme uBlock Origin Lite. Pour un seul site : le bouclier dans la barre d'adresse.",
+          "A short list, compiled by WebKit and applied before loading, without any script: \(domainSet.count) of the most common ad networks and trackers, and a few ad slots. Many ads still get through; to go further, an extension such as uBlock Origin Lite. For a single site: the shield in the address bar.")
+    }
+
+    /// A host the list blocks as a third party (the domain or one of its subdomains).
+    static func blocks(host: String) -> Bool {
+        let labels = host.lowercased().split(separator: ".")
+        return labels.indices.contains { domainSet.contains(labels[$0...].joined(separator: ".")) }
+    }
+
     static func encodedRules(allowlist: [String]) -> String {
         var rules: [[String: Any]] = []
         for domain in Set(domains).sorted() {

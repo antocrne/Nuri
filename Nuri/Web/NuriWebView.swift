@@ -40,6 +40,27 @@ final class NuriWebView: WKWebView {
         super.mouseDown(with: event)
     }
 
+    /// The mouse's side buttons: the one at the back (3) goes back, the one in front (4) forward,
+    /// as in every browser on the Mac. The page doesn't get them.
+    override func otherMouseDown(with event: NSEvent) {
+        switch event.buttonNumber {
+        case 3: if canGoBack { goBack() }
+        case 4: if canGoForward { goForward() }
+        default: super.otherMouseDown(with: event)
+        }
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        guard ![3, 4].contains(event.buttonNumber) else { return }
+        super.otherMouseUp(with: event)
+    }
+
+    /// The pointer left the page: no link stays shown at its bottom.
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        MainActor.assumeIsolated { if tab?.hoveredLink != nil { tab?.hoveredLink = nil } }
+    }
+
     @MainActor
     private func focusSplitSide() {
         guard let tab, let browser = tab.browser, browser.selectedTab !== tab, browser.splitPartner === tab else { return }

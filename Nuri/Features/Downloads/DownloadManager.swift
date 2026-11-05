@@ -15,7 +15,7 @@ final class DownloadItem: Identifiable {
     var destination: URL?
     var progress: Double = 0
     var state: State = .running
-    let started = Date()
+    let started: Date
     /// Started from a private window: never listed in the downloads history.
     let isPrivate: Bool
     @ObservationIgnored weak var browser: BrowserModel?
@@ -120,12 +120,56 @@ final class DownloadItem: Identifiable {
         receivedBytes > 0 ? L("Terminé · \(ByteCountFormatter.string(fromByteCount: receivedBytes, countStyle: .file))", "Done · \(ByteCountFormatter.string(fromByteCount: receivedBytes, countStyle: .file))") : L("Terminé", "Done")
     }
 
-    init(filename: String, sourceURL: URL?, browser: BrowserModel?) {
+    init(filename: String, sourceURL: URL?, browser: BrowserModel?, started: Date = Date()) {
         self.filename = filename
         self.sourceURL = sourceURL
         self.browser = browser
         self.isPrivate = browser?.isPrivate ?? false
+        self.started = started
     }
+
+    /// One of the list kept from an earlier launch: it is over (done, failed or cancelled).
+    convenience init(saved: SavedDownload) {
+        self.init(filename: saved.filename, sourceURL: saved.source, browser: nil, started: saved.started)
+        destination = saved.destination
+        receivedBytes = saved.received
+        totalBytes = saved.total
+        switch saved.state {
+        case "finished":
+            state = .finished
+            progress = 1
+        case "cancelled":
+            state = .cancelled
+        default:
+            state = .failed(saved.message ?? L("Interrompu", "Interrupted"))
+        }
+        if let source = saved.source { request = URLRequest(url: source) }
+    }
+
+    /// What is written: a download still running (Nuri stopped meanwhile) comes back as interrupted.
+    var saved: SavedDownload {
+        let (name, message): (String, String?) = switch state {
+        case .finished: ("finished", nil)
+        case .cancelled: ("cancelled", nil)
+        case .failed(let reason): ("failed", reason)
+        case .running, .paused: ("failed", L("Interrompu quand Nuri a quitté", "Interrupted when Nuri quit"))
+        }
+        return SavedDownload(filename: filename, source: sourceURL, destination: destination, state: name, message: message,
+                             received: receivedBytes, total: totalBytes, started: started)
+    }
+}
+
+/// A download of the list, in downloads.json next to the session.
+struct SavedDownload: Codable, Equatable {
+    var filename: String
+    var source: URL?
+    var destination: URL?
+    /// "finished", "failed" or "cancelled".
+    var state: String
+    var message: String?
+    var received: Int64
+    var total: Int64
+    var started: Date
 }
 
 /// Downloads go to the download folder (Settings → Téléchargements, ~/Downloads by default; unique
@@ -138,6 +182,48 @@ final class DownloadManager {
     private(set) var items: [DownloadItem] = []
     @ObservationIgnored private let delegate = DownloadDelegate()
     @ObservationIgnored private var stallWatch: Task<Void, Never>?
+    @ObservationIgnored private var saveWork: DispatchWorkItem?
+
+    /// The list survives a relaunch: downloads.json, never with a private window's.
+    static var listURL: URL { StateStore.directory.appendingPathComponent("downloads.json") }
+    /// The latest ones are kept.
+    static let keptInList = 200
+
+    private init() {
+        items = Self.readList(from: Self.listURL)
+    }
+
+    static func readList(from file: URL) -> [DownloadItem] {
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        guard let saved = try? JSONDecoder().decode([Lossy<SavedDownload>].self, from: data) else {
+            Log.storage.error("Liste des téléchargements illisible")
+            return []
+        }
+        return saved.compactMap(\.value).map(DownloadItem.init(saved:))
+    }
+
+    static func encodeList(_ items: [DownloadItem]) -> Data? {
+        try? JSONEncoder().encode(items.filter { !$0.isPrivate }.prefix(keptInList).map(\.saved))
+    }
+
+    /// Written a moment later: a burst of changes is one write (quitting writes at once).
+    func setNeedsSave() {
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveNow() }
+        saveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
+    func saveNow() {
+        saveWork?.cancel()
+        saveWork = nil
+        guard let data = Self.encodeList(items) else { return }
+        do {
+            try data.write(to: Self.listURL, options: .atomic)
+        } catch {
+            Log.storage.error("Liste des téléchargements non écrite : \(error.localizedDescription, privacy: .public)")
+        }
+    }
 
     var activeCount: Int { items.filter { $0.state == .running }.count }
     /// Running or paused: lost if Nuri quits.
@@ -193,6 +279,7 @@ final class DownloadManager {
         item.store = download.webView?.configuration.websiteDataStore
         attach(download, to: item)
         items.insert(item, at: 0)
+        if !item.isPrivate { setNeedsSave() }
         (browser ?? BrowserWindows.shared.active).showToast("arrow.down.circle", L("Téléchargement de \(item.filename)", "Downloading \(item.filename)"))
     }
 
@@ -288,6 +375,7 @@ final class DownloadManager {
         let previous = item.state
         item.state = .cancelled
         item.bytesPerSecond = 0
+        if !item.isPrivate { setNeedsSave() }
         switch previous {
         case .finished, .cancelled:
             DownloadManager.release(item.destination)
@@ -306,6 +394,7 @@ final class DownloadManager {
     /// The download asked where to save and the user cancelled: it leaves no trace in the list.
     fileprivate func remove(_ item: DownloadItem) {
         items.removeAll { $0 === item }
+        setNeedsSave()
     }
 
     /// A download that won't finish: no truncated file left behind that could pass for the real one.
@@ -356,6 +445,7 @@ final class DownloadManager {
                 try FileManager.default.moveItem(at: file, to: target)
                 item.destination = target
                 item.filename = target.lastPathComponent
+                setNeedsSave()
             } catch {
                 (item.browser ?? BrowserWindows.shared.active).showToast("exclamationmark.triangle", L("Déplacement impossible : \(error.localizedDescription)", "Couldn't move it: \(error.localizedDescription)"))
             }
@@ -393,6 +483,7 @@ final class DownloadManager {
             item.progress = 1
             item.state = .finished
             items.insert(item, at: 0)
+            if !item.isPrivate { setNeedsSave() }
             DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: destination.path)
             (browser ?? BrowserWindows.shared.active).showToast("checkmark.circle", L("\(item.filename) téléchargé", "\(item.filename) downloaded"))
         }
@@ -402,6 +493,7 @@ final class DownloadManager {
         let cleared = items.filter { $0.state != .running && $0.state != .paused && !$0.isPrivate }
         for item in cleared where item.resumeData != nil { discardPartialFile(of: item) }
         items.removeAll { item in cleared.contains { $0 === item } }
+        setNeedsSave()
     }
 
     /// A private window closed: stop what isn't done and forget its list.
@@ -614,6 +706,7 @@ private final class DownloadDelegate: NSObject, WKDownloadDelegate {
     func downloadDidFinish(_ download: WKDownload) {
         guard let item = DownloadManager.shared.item(for: download) else { return }
         item.state = .finished
+        if !item.isPrivate { DownloadManager.shared.setNeedsSave() }
         item.progress = 1
         if let progress = item.download?.progress { item.receivedBytes = max(item.receivedBytes, progress.completedUnitCount) }
         item.bytesPerSecond = 0
@@ -634,6 +727,8 @@ private final class DownloadDelegate: NSObject, WKDownloadDelegate {
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         guard let item = DownloadManager.shared.item(for: download), item.state == .running else { return }
         item.bytesPerSecond = 0
+        Log.downloads.error("Téléchargement en échec : \((error as NSError).domain, privacy: .public) \((error as NSError).code, privacy: .public)")
+        if !item.isPrivate { DownloadManager.shared.setNeedsSave() }
         if let resumeData {
             item.resumeData = resumeData
         } else {

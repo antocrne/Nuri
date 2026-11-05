@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import os
 import Security
 
 /// Nuri's own updates, from the project's GitHub releases: no Sparkle, no server of Nuri's own.
@@ -156,6 +157,7 @@ final class Updater {
     private func finishDownload(_ archive: URL?, release: Release) async {
         progressObservation = nil
         guard let archive else {
+            Log.updates.error("Téléchargement de la version \(release.version, privacy: .public) en échec")
             phase = .failed(release, L("Le téléchargement a échoué. Vérifiez la connexion.", "The download failed. Check your connection."))
             return
         }
@@ -165,6 +167,7 @@ final class Updater {
             staged = app
             phase = .ready(release)
         case .failure(let problem):
+            Log.updates.error("Version \(release.version, privacy: .public) refusée : \(String(describing: problem), privacy: .public)")
             phase = .failed(release, problem.message)
         }
     }

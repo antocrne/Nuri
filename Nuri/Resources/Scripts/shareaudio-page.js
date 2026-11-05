@@ -1,9 +1,9 @@
 // Nuri — sound in screen sharing, on the page's side. WebKit's getDisplayMedia only ever gives
 // the picture (Safari's too): when the user ticked « Partager aussi le son » in Nuri's question,
 // the stream gets an audio track made by Nuri (shareaudio.js). Injected in the page's own world,
-// at document start in every frame, so that the page's scripts only ever see the wrapped
-// function. The track comes from Nuri's isolated world through an <audio> element: the only
-// object both worlds see.
+// only in a frame that asks for the camera or the microphone (a call: ShareAudio.prepare), before
+// it gets them: on any other page it would tell the site it runs in Nuri. The track comes from
+// Nuri's isolated world through an <audio> element: the only object both worlds see.
 (() => {
   const proto = window.MediaDevices && MediaDevices.prototype;
   const original = proto && proto.getDisplayMedia;

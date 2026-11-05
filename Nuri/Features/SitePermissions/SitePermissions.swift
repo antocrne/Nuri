@@ -230,3 +230,38 @@ struct TabRequestBar: View {
         .help(L("Fermer", "Close"))
     }
 }
+
+/// What sites keep in a space's store: cookies, local storage, caches, databases. Listed by site
+/// (WebKit groups them by registrable domain), each can be erased alone.
+@MainActor
+enum SiteData {
+    struct Site: Identifiable, Equatable {
+        let name: String
+        let types: Set<String>
+        var id: String { name }
+
+        /// "cookies, stockage", in a word or two.
+        @MainActor var kinds: String {
+            var words: [String] = []
+            if types.contains(WKWebsiteDataTypeCookies) { words.append(L("cookies", "cookies")) }
+            if !types.isDisjoint(with: [WKWebsiteDataTypeLocalStorage, WKWebsiteDataTypeSessionStorage, WKWebsiteDataTypeIndexedDBDatabases,
+                                        WKWebsiteDataTypeWebSQLDatabases, WKWebsiteDataTypeFileSystem]) { words.append(L("stockage", "storage")) }
+            if !types.isDisjoint(with: [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache, WKWebsiteDataTypeFetchCache,
+                                        WKWebsiteDataTypeOfflineWebApplicationCache]) { words.append(L("cache", "cache")) }
+            if types.contains(WKWebsiteDataTypeServiceWorkerRegistrations) { words.append(L("service worker", "service worker")) }
+            return words.joined(separator: ", ")
+        }
+    }
+
+    static func sites(in store: WKWebsiteDataStore) async -> [Site] {
+        let records = await store.dataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes())
+        return records.map { Site(name: $0.displayName, types: $0.dataTypes) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    static func remove(_ site: Site, from store: WKWebsiteDataStore) async {
+        let records = await store.dataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()).filter { $0.displayName == site.name }
+        guard !records.isEmpty else { return }
+        await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: records)
+    }
+}

@@ -25,6 +25,8 @@ final class Tab: Identifiable {
     @ObservationIgnored var requestedURL: URL?
     var favicon: NSImage?
     @ObservationIgnored var faviconData: Data?
+    /// The site the icon belongs to: a page of another site that has none shows none.
+    @ObservationIgnored private var faviconHost: String?
 
     private(set) var webView: NuriWebView?
     var isLoading = false
@@ -32,6 +34,14 @@ final class Tab: Identifiable {
     var canGoBack = false
     var canGoForward = false
     var loadError: String?
+    /// The address whose load failed: « Réessayer » asks for it again, not for the page before it.
+    var failedURL: URL?
+    /// Opened by "view-source:": once its page has loaded, the page's source takes its place.
+    @ObservationIgnored var showsSourceWhenLoaded = false
+    /// The link under the pointer, shown at the bottom of the page.
+    var hoveredLink: URL?
+    /// Frames of the page given shareaudio-page.js (ShareAudio.prepare), until another page commits.
+    @ObservationIgnored var shareAudioFrames: Set<String> = []
     /// What the page asks, in a capsule above it (a window it wasn't allowed to open, notifications).
     var request: TabRequest?
     /// A local device's certificate that couldn't be checked: its error page offers to go on.
@@ -72,7 +82,8 @@ final class Tab: Identifiable {
     }
     /// The frame typed in last: what's asked before leaving (holdsTypedText).
     @ObservationIgnored var typedFrame: WKFrameInfo?
-    /// Created by the page (window.open / target=_blank): keeps its opener link, never auto-slept.
+    /// Created by the page (window.open / target=_blank): asleep, its opener would lose it. It
+    /// stays awake only while that link is really there (see sleepKeepingPlace).
     @ObservationIgnored var openedByPage = false
     /// Site of the page that opened this tab: a tab opened just to fetch a file asks for the
     /// download permission of that site, not of the file's server.
@@ -113,6 +124,7 @@ final class Tab: Identifiable {
         self.isPrivate = isPrivate
         self.faviconData = faviconData
         self.favicon = faviconData.flatMap(NSImage.init(data:))
+        self.faviconHost = faviconData == nil ? nil : url?.host()?.nuriNormalizedHost
         self.popupConfiguration = popupConfiguration
         self.openedByPage = popupConfiguration != nil
         self.savedInteractionState = interactionState
@@ -145,9 +157,14 @@ final class Tab: Identifiable {
         historyWasErased = true
     }
 
+    /// What a zoom is remembered by: the site, or "file://" for every file of the Mac.
+    static func zoomKey(_ url: URL) -> String? {
+        url.isFileURL ? "file://" : url.host()
+    }
+
     /// The zoom chosen for this site (⌘+ ⌘− ⌘0), set again at each page of it.
     func applySiteZoom() {
-        guard let webView, let host = webView.url?.host() else { return }
+        guard let webView, let host = webView.url.flatMap(Self.zoomKey) else { return }
         let zoom = AppSettings.shared.siteZoom(for: host)
         if webView.pageZoom != zoom { webView.pageZoom = zoom }
     }
@@ -204,10 +221,10 @@ final class Tab: Identifiable {
             Extensions.whenPagesMayLoad { [weak wv] in
                 wv?.interactionState = state
                 // A list this WebKit can't read (a file from another version): at least its page.
-                if wv?.backForwardList.currentItem == nil, let page { wv?.load(URLRequest(url: page)) }
+                if wv?.backForwardList.currentItem == nil, let page { wv?.nuriLoad(page) }
             }
         } else if !isPopup, let url {
-            Extensions.whenPagesMayLoad { [weak wv] in wv?.load(URLRequest(url: url)) }
+            Extensions.whenPagesMayLoad { [weak wv] in wv?.nuriLoad(url) }
         }
         return wv
     }
@@ -217,6 +234,7 @@ final class Tab: Identifiable {
         takeStateFromSession()
         self.url = url
         loadError = nil
+        failedURL = nil
         untrustedCertificate = nil
         insecurePage = nil
         typedAddress = nil
@@ -226,10 +244,10 @@ final class Tab: Identifiable {
         let isPopup = popupConfiguration != nil
         let wv = ensureWebView()
         if !asleep || isPopup {
-            wv.load(URLRequest(url: url))
+            wv.nuriLoad(url)
         } else if restoring {
             // Its history comes back first (ensureWebView), then the new page goes on top of it.
-            Extensions.whenPagesMayLoad { [weak wv] in wv?.load(URLRequest(url: url)) }
+            Extensions.whenPagesMayLoad { [weak wv] in wv?.nuriLoad(url) }
         }
         // Otherwise ensureWebView has just asked for `url`, once the blocker's rules are in: a
         // second load here would cancel that one and go out before the rules.
@@ -281,6 +299,8 @@ final class Tab: Identifiable {
         mediaFrames = [:]
         reader = nil
         hasUserInput = false
+        hoveredLink = nil
+        shareAudioFrames = []
         // What described the released page: the next web view reports its own.
         canGoBack = false
         canGoForward = false
@@ -296,9 +316,13 @@ final class Tab: Identifiable {
     /// tab was shown or became busy in the meantime).
     func sleepKeepingPlace(idleFor interval: TimeInterval) async {
         guard let webView else { return }
-        let position = await webView.nuriCall("return [window.scrollX, window.scrollY];") as? [Double]
+        // A tab a page opened keeps its web view while it can still talk with that page
+        // (window.opener: a sign-in or a payment answering it). A link opened in a new tab has none
+        // (noopener, the default for target=_blank), nor has a tab whose opener has gone.
+        let state = await webView.nuriCall("return [window.scrollX, window.scrollY, !!(window.opener && !window.opener.closed)];") as? [Any]
         guard browser?.visibleTabs.contains(where: { $0 === self }) != true, canAutoSleep(idleFor: interval) else { return }
-        if let position, position.count == 2 { pendingScroll = CGPoint(x: position[0], y: position[1]) }
+        if openedByPage, state?.last as? Bool != false { return }
+        if let state, state.count == 3, let x = state[0] as? Double, let y = state[1] as? Double { pendingScroll = CGPoint(x: x, y: y) }
         savedInteractionState = webView.interactionState
         sleep()
     }
@@ -349,6 +373,49 @@ final class Tab: Identifiable {
         insecurePage = nil
         guard empty else { return }
         if webView.canGoBack { webView.goBack() } else { browser?.close(self) }
+    }
+
+    /// « Réessayer » on the error page, and ⌘R after a failure: the address that failed (a link
+    /// followed from a page that loaded), else the tab's own.
+    func retryAfterError() {
+        let target = failedURL ?? url ?? requestedURL
+        loadError = nil
+        failedURL = nil
+        if let target { load(target) }
+    }
+
+    /// Shows the text of a page, escaped, in this tab: no script of it runs.
+    func showSource(_ source: String, of page: URL) {
+        let escaped = source.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
+        let title = "view-source:" + page.absoluteString
+        let titleEscaped = title.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+        let html = """
+            <!doctype html><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>\(titleEscaped)</title>
+            <style>body { margin: 0; } pre { margin: 0; padding: 14px 16px; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }</style>
+            <pre>\(escaped)</pre>
+            """
+        ensureWebView().loadHTMLString(html, baseURL: URL(string: "about:blank"))
+    }
+
+    /// A page committed: its title and icon, not those of the page before. Its title is empty until
+    /// it sets one (the tab then shows its site), and the icon of another site goes until this one's
+    /// is found (FaviconLoader, at the end of the load).
+    func takePageIdentity(of webView: WKWebView) {
+        let newTitle = webView.title ?? ""
+        if title != newTitle {
+            title = newTitle
+            Extensions.tabChanged(self, .title)
+        }
+        failedURL = nil
+        hoveredLink = nil
+        shareAudioFrames = []
+        let host = webView.url?.host()?.nuriNormalizedHost
+        if favicon != nil, host != faviconHost {
+            favicon = nil
+            faviconData = nil
+            faviconHost = nil
+            browser?.setNeedsSave()
+        }
     }
 
     /// A navigation committed: the page now shown is the one at `url`.
@@ -411,9 +478,10 @@ final class Tab: Identifiable {
     }
 
     /// Automatic sleep: only idle tabs. Tabs playing sound, in a call (camera/microphone), with
-    /// typed text, in PiP or reader mode stay awake.
+    /// typed text, in PiP or reader mode stay awake; so does one a page opened that still talks with
+    /// it, which only its page can tell (sleepKeepingPlace).
     func canAutoSleep(idleFor interval: TimeInterval, now: Date = Date()) -> Bool {
-        guard let webView, !openedByPage, reader == nil else { return false }
+        guard let webView, reader == nil else { return false }
         guard now.timeIntervalSince(lastAccess) >= interval else { return false }
         if isAudible || isPlayingVideo || isInPiP || isInFloatingPlayer || isInElementFullscreen || hasUserInput { return false }
         if webView.cameraCaptureState != .none || webView.microphoneCaptureState != .none { return false }
@@ -489,9 +557,10 @@ final class Tab: Identifiable {
         PiPController.shared.callStateChanged(self)
     }
 
-    func setFavicon(_ image: NSImage, data: Data) {
+    func setFavicon(_ image: NSImage, data: Data, host: String? = nil) {
         favicon = image
         faviconData = data
+        faviconHost = (host ?? webView?.url?.host())?.nuriNormalizedHost
         browser?.setNeedsSave()
     }
 }

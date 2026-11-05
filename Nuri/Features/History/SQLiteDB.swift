@@ -1,4 +1,5 @@
 import Foundation
+import os
 import SQLite3
 
 /// Minimal SQLite wrapper (system libsqlite3, no dependency).
@@ -57,7 +58,7 @@ final class SQLiteDB {
     private func prepare(_ sql: String, _ args: [Any?]) -> OpaquePointer? {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK else {
-            NSLog("[Nuri] SQLite: %@", String(cString: sqlite3_errmsg(handle)))
+            Log.storage.error("SQLite : \(String(cString: sqlite3_errmsg(self.handle)), privacy: .public)")
             return nil
         }
         for (i, arg) in args.enumerated() {

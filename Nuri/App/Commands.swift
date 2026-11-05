@@ -73,11 +73,11 @@ struct Shortcut: Equatable, Codable {
 enum NuriCommand: String, CaseIterable, Identifiable {
     case newTab, newWindow, newPrivateWindow, address, closeTab, closeWindow, closeAllTabs, reopenTab
     case nextTab, previousTab, newFolder, muteTab
-    case back, forward, reload, reloadHard, stop, copyAddress, printPage
+    case back, forward, reload, reloadHard, stop, copyAddress, printPage, savePage, openFile
     case find, findNext, findPrevious, zoomIn, zoomOut, zoomReset
     case reader, pip, split, swapSides, focusOtherSide, toggleBar, fullScreen
     case nextSpace, previousSpace
-    case bookmark, bookmarks, history, downloads, blockerForSite, inspector, console
+    case bookmark, bookmarks, history, downloads, blockerForSite, viewSource, inspector, console
     case tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9
 
     var id: String { rawValue }
@@ -104,6 +104,8 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .stop: Shortcut(".", "c")
         case .copyAddress: Shortcut("c", "cs")
         case .printPage: Shortcut("p", "c")
+        case .savePage: Shortcut("s", "c")
+        case .openFile: Shortcut("o", "c")
         case .find: Shortcut("f", "c")
         case .findNext: Shortcut("g", "c")
         case .findPrevious: Shortcut("g", "cs")
@@ -124,6 +126,7 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .history: Shortcut("y", "c")
         case .downloads: Shortcut("l", "co")
         case .blockerForSite: nil
+        case .viewSource: Shortcut("u", "co")
         case .inspector: Shortcut("i", "co")
         case .console: Shortcut("j", "co")
         case .tab1: Shortcut("1", "c")
@@ -159,6 +162,8 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .stop: L("Arrêter", "Stop")
         case .copyAddress: L("Copier l'adresse", "Copy Address")
         case .printPage: L("Imprimer…", "Print…")
+        case .savePage: L("Enregistrer la page…", "Save Page As…")
+        case .openFile: L("Ouvrir un fichier…", "Open File…")
         case .find: L("Rechercher dans la page", "Find on Page")
         case .findNext: L("Résultat suivant", "Find Next")
         case .findPrevious: L("Résultat précédent", "Find Previous")
@@ -179,6 +184,7 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .history: L("Historique", "History")
         case .downloads: L("Téléchargements", "Downloads")
         case .blockerForSite: L("Bloqueur sur ce site", "Blocker on This Site")
+        case .viewSource: L("Afficher la source de la page", "Show Page Source")
         case .inspector: L("Inspecteur web", "Web Inspector")
         case .console: L("Console JavaScript", "JavaScript Console")
         case .tab1, .tab2, .tab3, .tab4, .tab5, .tab6, .tab7, .tab8:
@@ -218,7 +224,9 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .stop: browser.stopLoading()
         case .copyAddress: browser.copyAddress()
         case .printPage: browser.printPage()
-        case .find: browser.findBarVisible = true
+        case .savePage: browser.savePage()
+        case .openFile: browser.openFile()
+        case .find: browser.showFindBar()
         case .findNext: browser.findAgain(backwards: false)
         case .findPrevious: browser.findAgain(backwards: true)
         case .zoomIn: browser.zoom(0.1)
@@ -238,6 +246,7 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .history: HistoryWindow.show(for: browser)
         case .downloads: browser.showingDownloads.toggle()
         case .blockerForSite: browser.toggleAdBlockForCurrentSite()
+        case .viewSource: browser.showSource()
         case .inspector: browser.toggleInspector(console: false)
         case .console: browser.toggleInspector(console: true)
         case .tab1, .tab2, .tab3, .tab4, .tab5, .tab6, .tab7, .tab8, .tab9:
@@ -292,9 +301,13 @@ final class NuriMenu: NSObject {
     private func build() -> NSMenu {
         let main = NSMenu()
         main.addItem(submenu("Nuri", appMenu()))
-        main.addItem(submenu(L("Fichier", "File"), items([.newTab, .newWindow, .newPrivateWindow, nil, .address, nil, .closeTab, .closeWindow, .closeAllTabs, .reopenTab, nil, .printPage])))
+        let file = items([.newTab, .newWindow, .newPrivateWindow, .openFile, nil, .address, nil, .closeTab, .closeWindow, .closeAllTabs, .reopenTab, nil, .savePage, .printPage])
+        file.addItem(.separator())
+        add(file, L("Importer depuis un autre navigateur…", "Import from Another Browser…"), #selector(importFromBrowser))
+        add(file, L("Exporter les signets…", "Export Bookmarks…"), #selector(exportBookmarks))
+        main.addItem(submenu(L("Fichier", "File"), file))
         main.addItem(submenu(L("Édition", "Edit"), editMenu()))
-        main.addItem(submenu(L("Présentation", "View"), items([.reload, .reloadHard, .stop, nil, .find, .findNext, .findPrevious, nil, .zoomIn, .zoomOut, .zoomReset, nil, .reader, .pip, nil, .toggleBar, .fullScreen, nil, .inspector, .console])))
+        main.addItem(submenu(L("Présentation", "View"), items([.reload, .reloadHard, .stop, nil, .find, .findNext, .findPrevious, nil, .zoomIn, .zoomOut, .zoomReset, nil, .reader, .pip, nil, .toggleBar, .fullScreen, nil, .viewSource, .inspector, .console])))
         main.addItem(submenu(L("Navigation", "Go"), items([.back, .forward, nil, .copyAddress, nil, .history, .downloads, nil, .blockerForSite])))
         main.addItem(submenu(L("Signets", "Bookmarks"), items([.bookmark, .bookmarks])))
         main.addItem(submenu(L("Onglets", "Tabs"), items([.nextTab, .previousTab, nil, .split, .swapSides, .focusOtherSide, nil, .muteTab, .newFolder, nil, .tab1, .tab2, .tab3, .tab4, .tab5, .tab6, .tab7, .tab8, .tab9])))
@@ -306,6 +319,7 @@ final class NuriMenu: NSObject {
         item.submenu = window
         main.addItem(item)
         NSApp.windowsMenu = window
+        main.addItem(submenu(L("Aide", "Help"), helpMenu()))
         return main
     }
 
@@ -347,6 +361,13 @@ final class NuriMenu: NSObject {
         add(menu, L("Réglages…", "Settings…"), #selector(settings), key: ",")
         add(menu, L("Raccourcis clavier", "Keyboard Shortcuts"), #selector(shortcuts))
         menu.addItem(.separator())
+        // Filled by macOS with the services of the installed apps.
+        let services = NSMenu(title: L("Services", "Services"))
+        let servicesItem = NSMenuItem(title: L("Services", "Services"), action: nil, keyEquivalent: "")
+        servicesItem.submenu = services
+        menu.addItem(servicesItem)
+        NSApp.servicesMenu = services
+        menu.addItem(.separator())
         let hide = NSMenuItem(title: L("Masquer Nuri", "Hide Nuri"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         menu.addItem(hide)
         let others = NSMenuItem(title: L("Masquer les autres", "Hide Others"), action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -373,8 +394,31 @@ final class NuriMenu: NSObject {
         menu.addItem(withTitle: L("Couper", "Cut"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         menu.addItem(withTitle: L("Copier", "Copy"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         menu.addItem(withTitle: L("Coller", "Paste"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        // The text alone, without its fonts and colors (WebKit's pages and AppKit's fields both answer it).
+        let plain = NSMenuItem(title: L("Coller sans mise en forme", "Paste and Match Style"), action: #selector(NSTextView.pasteAsPlainText(_:)), keyEquivalent: "v")
+        plain.keyEquivalentModifierMask = [.command, .option, .shift]
+        menu.addItem(plain)
+        menu.addItem(withTitle: L("Supprimer", "Delete"), action: #selector(NSText.delete(_:)), keyEquivalent: "")
         menu.addItem(withTitle: L("Tout sélectionner", "Select All"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         return menu
+    }
+
+    /// macOS adds its search field at the top of a menu named as NSApp.helpMenu.
+    private func helpMenu() -> NSMenu {
+        let menu = NSMenu()
+        add(menu, L("Raccourcis clavier", "Keyboard Shortcuts"), #selector(shortcuts))
+        add(menu, L("Nuri sur GitHub", "Nuri on GitHub"), #selector(openRepository))
+        add(menu, L("Signaler un problème…", "Report a Problem…"), #selector(reportProblem))
+        NSApp.helpMenu = menu
+        return menu
+    }
+
+    @objc private func openRepository() {
+        if let url = URL(string: "https://github.com/\(Updater.repository)") { BrowserWindows.shared.normalTarget.openExternal(url) }
+    }
+
+    @objc private func reportProblem() {
+        if let url = URL(string: "https://github.com/\(Updater.repository)/issues") { BrowserWindows.shared.normalTarget.openExternal(url) }
     }
 
     private func spacesMenu() -> NSMenu {
@@ -392,6 +436,9 @@ final class NuriMenu: NSObject {
     @objc private func checkForUpdates() {
         Task { await Updater.shared.check(userInitiated: true) }
     }
+
+    @objc private func importFromBrowser() { SettingsWindow.show(.general) }
+    @objc private func exportBookmarks() { BrowserImport.exportWithPanel(space: BrowserWindows.shared.normalTarget.currentSpace) }
 
     @objc private func settings() { SettingsWindow.show() }
     @objc private func shortcuts() { SettingsWindow.show(.shortcuts) }

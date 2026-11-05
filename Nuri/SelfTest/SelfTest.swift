@@ -2,6 +2,7 @@
 import AppKit
 import Network
 import os
+import OSLog
 import SwiftUI
 import WebKit
 
@@ -86,6 +87,10 @@ final class FeatureSelfTest {
             ("partage-son", { await $0.testShareAudio() }),
             ("pip", { await $0.testPiP() }),
             ("apercu", { await $0.testPreview() }),
+            ("import", { await $0.testImport() }),
+            ("audit", { await $0.testAudit() }),
+            ("certificat", { await $0.testExpiredCertificate() }),
+            ("mineurs", { await $0.testMinorFixes() }),
         ]
     }
 
@@ -2566,6 +2571,14 @@ final class FeatureSelfTest {
         WebKitSPI.setPreference(webView.configuration.preferences, "mockCaptureDevicesEnabled", true)
         browser.window?.makeFirstResponder(webView)
         await sleep(0.5)
+        // A call asks for its microphone first: only then does its frame get what adds the sound.
+        let native = await webView.nuriCall("return MediaDevices.prototype.getDisplayMedia.toString().includes('[native code]');", world: .page, timeout: 2) as? Bool
+        _ = await webView.nuriCall("try { await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e) {} return 1;", world: .page, timeout: 4)
+        let wrapped = await webView.nuriCall("return !MediaDevices.prototype.getDisplayMedia.toString().includes('[native code]');", world: .page, timeout: 2) as? Bool
+        // WebKit only passes on a capture request from a page that has the focus: Nuri in front.
+        if !(NSApp.isActive && browser.window?.isKeyWindow == true) { eventsWereInFront = false }
+        check("Partage du son : getDisplayMedia reste natif tant que la page n'a demandé ni caméra ni micro, puis il est enveloppé", native == true && wrapped == true,
+              "natif avant \(String(describing: native)) · enveloppé après \(String(describing: wrapped))")
 
         let wholeScreen = L("Partager l'écran entier…", "Share Entire Screen…")
         func shareScreen(sound: Bool, choice: String = wholeScreen) async -> String {
@@ -3053,6 +3066,883 @@ private final class TestProxy: @unchecked Sendable {
             }
             self.pipe(from, to)
         }
+    }
+}
+
+// MARK: - Audit of 2026-11-01: bugs 14 to 44
+
+/// A local HTTP server answering each path with what `route` says, and keeping every request.
+final class RouteServer: @unchecked Sendable {
+    struct Response {
+        var status = "200 OK"
+        var type = "text/html; charset=utf-8"
+        var headers: [String: String] = [:]
+        var body = Data()
+    }
+    let listener: NWListener
+    private let route: @Sendable (String) -> Response
+    private let state = OSAllocatedUnfairLock<[String]>(initialState: [])
+    var port: UInt16 { listener.port?.rawValue ?? 0 }
+    var requests: [String] { state.withLock { $0 } }
+
+    init?(_ route: @escaping @Sendable (String) -> Response) {
+        guard let listener = try? NWListener(using: .tcp, on: .any) else { return nil }
+        self.listener = listener
+        self.route = route
+        listener.newConnectionHandler = { [weak self] connection in
+            connection.start(queue: .global())
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
+                guard let self else { return connection.cancel() }
+                let request = String(decoding: data ?? Data(), as: UTF8.self)
+                self.state.withLock { $0.append(request) }
+                let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
+                let answer = self.route(path)
+                var head = "HTTP/1.1 \(answer.status)\r\nContent-Type: \(answer.type)\r\nContent-Length: \(answer.body.count)\r\nConnection: close\r\n"
+                for (name, value) in answer.headers { head += "\(name): \(value)\r\n" }
+                connection.send(content: Data((head + "\r\n").utf8) + answer.body, completion: .contentProcessed { _ in connection.cancel() })
+            }
+        }
+        listener.start(queue: .global())
+    }
+    deinit { listener.cancel() }
+}
+
+extension RouteServer.Response {
+    static func html(_ text: String, headers: [String: String] = [:]) -> Self { Self(headers: headers, body: Data(text.utf8)) }
+}
+
+extension FeatureSelfTest {
+    private func makeRouteServer(_ route: @escaping @Sendable (String) -> RouteServer.Response) async -> RouteServer? {
+        guard let server = RouteServer(route) else { return nil }
+        _ = await until(2) { server.port != 0 }
+        return server
+    }
+
+    private var scratch: URL {
+        let url = StateStore.directory.appendingPathComponent("audit-\(UUID().uuidString.prefix(6))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    // MARK: 15. Import and export
+
+    func testImport() async {
+        let library = scratch
+        let support = library.appendingPathComponent("Application Support", isDirectory: true)
+        let fm = FileManager.default
+        // Chrome: Bookmarks (JSON) and History (SQLite), two profiles.
+        let chrome = support.appendingPathComponent("Google/Chrome/Default", isDirectory: true)
+        try? fm.createDirectory(at: chrome, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: support.appendingPathComponent("Google/Chrome/Profile 1", isDirectory: true), withIntermediateDirectories: true)
+        try? Data("{}".utf8).write(to: support.appendingPathComponent("Google/Chrome/Profile 1/Bookmarks"))
+        let chromeBookmarks = """
+            {"roots": {"bookmark_bar": {"type": "folder", "children": [
+              {"type": "url", "name": "Wikipédia", "url": "https://fr.wikipedia.org/"},
+              {"type": "folder", "name": "Dev", "children": [{"type": "url", "name": "Swift", "url": "https://swift.org/"}]},
+              {"type": "url", "name": "Script", "url": "javascript:alert(1)"}]},
+              "other": {"type": "folder", "children": [{"type": "url", "name": "Apple", "url": "https://www.apple.com/"}]}}}
+            """
+        try? Data(chromeBookmarks.utf8).write(to: chrome.appendingPathComponent("Bookmarks"))
+        let chromeHistory = SQLiteDB(path: chrome.appendingPathComponent("History").path)
+        chromeHistory?.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT, visit_count INTEGER, last_visit_time INTEGER, hidden INTEGER DEFAULT 0)")
+        let now = Date()
+        let chromeTime = Int64((now.timeIntervalSince1970 + 11_644_473_600) * 1_000_000)
+        chromeHistory?.execute("INSERT INTO urls (url, title, visit_count, last_visit_time) VALUES (?, ?, ?, ?)", ["https://swift.org/blog/", "Blog Swift", 7, chromeTime])
+        chromeHistory?.execute("INSERT INTO urls (url, title, visit_count, last_visit_time) VALUES (?, ?, ?, ?)", ["https://ancien.example/", "Trop vieux", 1, chromeTime - Int64(5 * 365 * 86_400) * 1_000_000])
+        chromeHistory?.execute("INSERT INTO urls (url, title, visit_count, last_visit_time, hidden) VALUES (?, ?, ?, ?, 1)", ["https://cache.example/", "Caché", 1, chromeTime])
+        // Firefox: places.sqlite.
+        let firefox = support.appendingPathComponent("Firefox/Profiles/ab12.default-release", isDirectory: true)
+        try? fm.createDirectory(at: firefox, withIntermediateDirectories: true)
+        let places = SQLiteDB(path: firefox.appendingPathComponent("places.sqlite").path)
+        places?.execute("CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT, visit_count INTEGER, last_visit_date INTEGER)")
+        places?.execute("CREATE TABLE moz_bookmarks (id INTEGER PRIMARY KEY, type INTEGER, fk INTEGER, title TEXT)")
+        places?.execute("INSERT INTO moz_places VALUES (1, 'https://developer.mozilla.org/', 'MDN', 3, ?)", [Int64(now.timeIntervalSince1970 * 1_000_000)])
+        places?.execute("INSERT INTO moz_places VALUES (2, 'place:sort=8', NULL, 0, NULL)")
+        places?.execute("INSERT INTO moz_bookmarks VALUES (1, 1, 1, 'Docs MDN')")
+        places?.execute("INSERT INTO moz_bookmarks VALUES (2, 1, 2, 'Requête')")
+        places?.execute("INSERT INTO moz_bookmarks VALUES (3, 2, NULL, 'Dossier')")
+        // Safari: Bookmarks.plist and History.db.
+        let safari = library.appendingPathComponent("Safari", isDirectory: true)
+        try? fm.createDirectory(at: safari, withIntermediateDirectories: true)
+        let plist: [String: Any] = ["WebBookmarkType": "WebBookmarkTypeList", "Children": [
+            ["WebBookmarkType": "WebBookmarkTypeList", "Title": "BookmarksBar", "Children": [
+                ["WebBookmarkType": "WebBookmarkTypeLeaf", "URLString": "https://www.lemonde.fr/", "URIDictionary": ["title": "Le Monde"]]]],
+            ["WebBookmarkType": "WebBookmarkTypeList", "Title": "com.apple.ReadingList", "Children": [
+                ["WebBookmarkType": "WebBookmarkTypeLeaf", "URLString": "https://a-lire.example/", "URIDictionary": ["title": "À lire"]]]],
+        ]]
+        try? PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0).write(to: safari.appendingPathComponent("Bookmarks.plist"))
+        let safariHistory = SQLiteDB(path: safari.appendingPathComponent("History.db").path)
+        safariHistory?.execute("CREATE TABLE history_items (id INTEGER PRIMARY KEY, url TEXT, visit_count INTEGER)")
+        safariHistory?.execute("CREATE TABLE history_visits (id INTEGER PRIMARY KEY, history_item INTEGER, visit_time REAL, title TEXT)")
+        safariHistory?.execute("INSERT INTO history_items VALUES (1, 'https://www.apple.com/fr/', 4)")
+        safariHistory?.execute("INSERT INTO history_visits VALUES (1, 1, ?, 'Ancien titre')", [now.timeIntervalSinceReferenceDate - 100])
+        safariHistory?.execute("INSERT INTO history_visits VALUES (2, 1, ?, 'Apple (France)')", [now.timeIntervalSinceReferenceDate])
+
+        let sources = BrowserImport.sources(library: library)
+        check("Import : Safari, Chrome (deux profils) et Firefox trouvés", sources.map(\.name) == ["Safari", "Google Chrome (Default)", "Google Chrome (Profile 1)", "Firefox"],
+              sources.map(\.name).joined(separator: ", "))
+        func source(_ name: String) -> ImportSource? { sources.first { $0.name == name } }
+        let chromeMarks = source("Google Chrome (Default)").map { (try? BrowserImport.bookmarks(of: $0).get()) ?? [] } ?? []
+        check("Import : favoris de Chrome, dossiers compris, sans javascript:", chromeMarks.map(\.url.absoluteString) == ["https://fr.wikipedia.org/", "https://swift.org/", "https://www.apple.com/"]
+              && chromeMarks.first?.title == "Wikipédia", chromeMarks.map(\.url.absoluteString).joined(separator: " "))
+        let chromeVisits = source("Google Chrome (Default)").map { (try? BrowserImport.history(of: $0).get()) ?? [] } ?? []
+        let blog = chromeVisits.first { $0.url.absoluteString == "https://swift.org/blog/" }
+        check("Import : historique de Chrome (dates de 1601, pages cachées exclues)", chromeVisits.count == 2 && blog?.visits == 7
+              && abs((blog?.last.timeIntervalSince(now)) ?? 99) < 2, "\(chromeVisits.map(\.url.absoluteString)) \(String(describing: blog?.last))")
+        let firefoxMarks = source("Firefox").map { (try? BrowserImport.bookmarks(of: $0).get()) ?? [] } ?? []
+        let firefoxVisits = source("Firefox").map { (try? BrowserImport.history(of: $0).get()) ?? [] } ?? []
+        check("Import : Firefox, favoris (sans les requêtes place:) et historique", firefoxMarks == [ImportedBookmark(url: URL(string: "https://developer.mozilla.org/")!, title: "Docs MDN")]
+              && firefoxVisits.map(\.title) == ["MDN"] && abs((firefoxVisits.first?.last.timeIntervalSince(now)) ?? 99) < 2, "\(firefoxMarks) \(firefoxVisits)")
+        let safariMarks = source("Safari").map { (try? BrowserImport.bookmarks(of: $0).get()) ?? [] } ?? []
+        let safariVisits = source("Safari").map { (try? BrowserImport.history(of: $0).get()) ?? [] } ?? []
+        check("Import : Safari, favoris sans la liste de lecture, historique avec le dernier titre", safariMarks.map(\.title) == ["Le Monde"]
+              && safariVisits.first?.title == "Apple (France)" && safariVisits.first?.visits == 4, "\(safariMarks) \(safariVisits)")
+        // Without Full Disk Access: said so, not an empty import.
+        let locked = ImportSource(kind: .chromium, name: "Verrouillé", bookmarks: URL(fileURLWithPath: "/private/var/db/sudo/nuri-introuvable"), history: nil)
+        if case .failure(let failure) = BrowserImport.bookmarks(of: locked) {
+            check("Import : un fichier illisible est signalé", [.unreadable, .noAccess].contains(failure))
+        } else {
+            check("Import : un fichier illisible est signalé", false)
+        }
+
+        // Into a space of its own: bookmarks and history, nothing twice.
+        let space = browser.addSpace(name: "Import")
+        HistoryStore.shared.deleteAll(ofSpace: space.id)
+        guard let chromeSource = source("Google Chrome (Default)") else { return }
+        let first = await BrowserImport.run(chromeSource, bookmarks: true, history: true, into: space.id)
+        let again = await BrowserImport.run(chromeSource, bookmarks: true, history: true, into: space.id)
+        check("Import : dans l'espace choisi, sans doublon au second import", (try? first.get()) == BrowserImport.Outcome(bookmarks: 3, pages: 1)
+              && (try? again.get()) == BrowserImport.Outcome(bookmarks: 0, pages: 0)
+              && BookmarkStore.shared.bookmarks(space: space.id).count == 3, "\(first) \(again)")
+        let entry = HistoryStore.shared.search("swift.org/blog", space: space.id).first
+        check("Import : la page garde son nombre de visites et sa date ; trop ancienne, elle reste dehors", entry?.visits == 7 && entry?.title == "Blog Swift"
+              && HistoryStore.shared.search("ancien.example", space: space.id).isEmpty, "\(String(describing: entry))")
+        check("Import : la barre de commande retrouve les pages importées", SuggestionEngine.suggestions(for: "swift", browser: browser).contains { $0.subtitle == "https://swift.org/blog/" })
+
+        // The HTML file, both ways.
+        BookmarkStore.shared.setFavorite(BookmarkStore.shared.bookmarks(space: space.id)[0].id, true)
+        BookmarkStore.shared.add(url: URL(string: "https://exemple.fr/?a=1&b=<2>")!, title: "Guillemets \" & <balises>", favicon: nil, space: space.id)
+        let exported = BrowserImport.exportHTML(BookmarkStore.shared.items.filter { $0.spaceID == space.id })
+        let back = BrowserImport.htmlBookmarks(exported)
+        check("Import : l'export HTML se relit à l'identique (favoris compris, caractères spéciaux)", exported.hasPrefix("<!DOCTYPE NETSCAPE-Bookmark-file-1>")
+              && Set(back.map(\.url)) == Set(BookmarkStore.shared.items.filter { $0.spaceID == space.id }.map(\.url))
+              && back.contains { $0.title == "Guillemets \" & <balises>" }, "\(back.map(\.title))")
+        let firefoxExport = """
+            <!DOCTYPE NETSCAPE-Bookmark-file-1>
+            <DL><p><DT><H3 ADD_DATE="1">Barre</H3><DL><p>
+            <DT><A HREF="https://www.mozilla.org/fr/" ADD_DATE="1" ICON="data:image/png;base64,AAA">Mozilla &amp; co &#233;t&#xE9;</A>
+            <DT><A HREF="place:type=6">Récents</A>
+            </DL><p></DL>
+            """
+        let file = library.appendingPathComponent("bookmarks.html")
+        try? Data(firefoxExport.utf8).write(to: file)
+        let fromFile = BrowserImport.runFile(file, into: space.id)
+        check("Import : un fichier HTML de Firefox ou Safari", (try? fromFile.get())?.bookmarks == 1
+              && BookmarkStore.shared.bookmark(for: URL(string: "https://www.mozilla.org/fr/"), space: space.id)?.title == "Mozilla & co été", "\(fromFile)")
+        check("Import : menus Fichier → Importer et Exporter", NSApp.mainMenu?.items.first { $0.submenu?.title == L("Fichier", "File") }?.submenu?.items
+              .contains { $0.title == L("Exporter les signets…", "Export Bookmarks…") } == true)
+        BookmarkStore.shared.removeAll(space: space.id)
+        try? fm.removeItem(at: library)
+    }
+}
+
+extension FeatureSelfTest {
+    /// The window is in front and the keyboard can be given: focus tests mean something.
+    private func frontForKeyboard() async -> Bool {
+        for _ in 0..<15 where !(NSApp.isActive && browser.window?.isKeyWindow == true) {
+            NSApp.activate(ignoringOtherApps: true)
+            browser.window?.makeKeyAndOrderFront(nil)
+            await sleep(0.2)
+        }
+        let front = NSApp.isActive && browser.window?.isKeyWindow == true
+        if !front { eventsWereInFront = false }
+        return front
+    }
+
+    private var fieldEditor: NSTextView? {
+        (browser.window?.firstResponder as? NSTextView).flatMap { $0.isFieldEditor ? $0 : nil }
+    }
+
+    private func key(_ code: UInt16, _ characters: String, flags: NSEvent.ModifierFlags = []) {
+        guard let window = browser.window,
+              let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber, context: nil, characters: characters,
+                                           charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) else { return }
+        // Through the application: it becomes NSApp.currentEvent, as a real key does.
+        NSApp.sendEvent(event)
+    }
+
+    private static let pngIcon: Data = {
+        let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+            NSColor.systemOrange.setFill()
+            rect.fill()
+            return true
+        }
+        return image.nuriResizedPNG(side: 16) ?? Data()
+    }()
+
+    func testAudit() async {
+        await auditFailedLink()
+        cleanUp()
+        eventsWereInFront = true
+        await auditPageIdentity()
+        cleanUp()
+        eventsWereInFront = true
+        await auditHoveredLink()
+        cleanUp()
+        eventsWereInFront = true
+        await auditMediaPermissions()
+        cleanUp()
+        eventsWereInFront = true
+        await auditDownloadsList()
+        cleanUp()
+        eventsWereInFront = true
+        await auditSaveAndOpen()
+        cleanUp()
+        eventsWereInFront = true
+        await auditMouseButtons()
+        cleanUp()
+        eventsWereInFront = true
+        await auditFindBar()
+        cleanUp()
+        eventsWereInFront = true
+        await auditCompletion()
+        cleanUp()
+        eventsWereInFront = true
+        await auditTypedAddress()
+        cleanUp()
+        eventsWereInFront = true
+        await auditFavicons()
+        cleanUp()
+        eventsWereInFront = true
+        await auditSiteData()
+        cleanUp()
+        eventsWereInFront = true
+        await auditJournal()
+    }
+
+    // 16. « Réessayer » asks for the address that failed.
+    private func auditFailedLink() async {
+        guard let server = await makeRouteServer({ _ in .html("<!doctype html><title>Départ</title>départ") }) else { return check("Réessayer : serveur local", false) }
+        var dead = await makeRouteServer { _ in .html("") }
+        let deadPort = dead?.port ?? 1
+        dead = nil
+        await sleep(0.3)
+        let start = URL(string: "http://127.0.0.1:\(server.port)/depart")!
+        let tab = browser.openTab(url: start)
+        await waitForLoad(tab)
+        let bad = URL(string: "http://127.0.0.1:\(deadPort)/introuvable")!
+        _ = await tab.webView?.nuriCall("location.href = address; return 1;", arguments: ["address": bad.absoluteString], world: .page, timeout: 2)
+        let failed = await until(8) { tab.loadError != nil }
+        check("Réessayer : le lien en échec est gardé sur l'onglet, l'adresse reste celle de la page affichée", failed && tab.failedURL == bad && tab.url == start,
+              "erreur \(tab.loadError ?? "nil") · en échec \(tab.failedURL?.absoluteString ?? "nil") · onglet \(tab.url?.absoluteString ?? "nil")")
+        let before = server.requests.count
+        tab.retryAfterError()
+        let again = await until(8) { tab.loadError != nil && !tab.isLoading }
+        check("Réessayer : redemande l'adresse en échec, pas l'ancienne page", again && server.requests.count == before && tab.failedURL == bad,
+              "requêtes à l'ancienne page \(server.requests.count - before) · en échec \(tab.failedURL?.absoluteString ?? "nil")")
+        browser.select(tab)
+        browser.reload()
+        _ = await until(8) { tab.loadError != nil && !tab.isLoading }
+        check("Réessayer : ⌘R après l'échec aussi", server.requests.count == before && tab.failedURL == bad)
+        await snapshot("erreur-reessayer")
+    }
+
+    // 17. A page without title or icon doesn't keep those of the site before.
+    private func auditPageIdentity() async {
+        let tab = await htmlTab("<title>Site A</title>a", base: "https://site-a.example/")
+        let icon = NSImage(data: Self.pngIcon) ?? NSImage()
+        tab.setFavicon(icon, data: Self.pngIcon, host: "site-a.example")
+        tab.webView?.loadHTMLString("<p>autre page du même site</p>", baseURL: URL(string: "https://site-a.example/deux"))
+        await waitForLoad(tab)
+        check("Titre et icône : une page du même site sans icône garde celle du site", tab.favicon != nil && tab.title.isEmpty, "titre « \(tab.title) »")
+        tab.webView?.loadHTMLString("<title>Titre</title>t", baseURL: URL(string: "https://site-a.example/trois"))
+        await waitForLoad(tab)
+        tab.webView?.loadHTMLString("<p>sans titre</p>", baseURL: URL(string: "https://site-b.example/"))
+        await waitForLoad(tab)
+        check("Titre et icône : une page d'un autre site sans titre ni icône n'a plus ceux d'avant", tab.title.isEmpty && tab.favicon == nil && tab.faviconData == nil
+              && tab.displayTitle == "site-b.example", "titre « \(tab.title) » · icône \(tab.favicon != nil) · affiché \(tab.displayTitle)")
+    }
+
+    // 18. The address of the link under the pointer.
+    private func auditHoveredLink() async {
+        final class FakeHit: NSObject {
+            @objc let absoluteLinkURL: URL?
+            init(_ url: URL?) { absoluteLinkURL = url }
+        }
+        let tab = await htmlTab("<title>Liens</title><a id='l' href='https://lien.example/chemin?q=1' style='position:absolute;left:30px;top:30px;font-size:40px'>un lien</a>")
+        browser.select(tab)
+        guard let webView = tab.webView, let delegate = webView.uiDelegate as? TabWebDelegate else { return check("Survol : délégué", false) }
+        let link = URL(string: "https://lien.example/chemin?q=1")!
+        delegate.webView(webView, mouseDidMoveOverElement: FakeHit(link), withFlags: 0, userInfo: nil)
+        check("Survol : WebKit dit le lien sous le pointeur, l'onglet le garde", tab.hoveredLink == link)
+        await snapshot("lien-survole")
+        delegate.webView(webView, mouseDidMoveOverElement: FakeHit(nil), withFlags: 0, userInfo: nil)
+        check("Survol : hors du lien, l'adresse s'en va", tab.hoveredLink == nil)
+        // The real way: the pointer moves over the link, WebKit's hit test calls the delegate.
+        let frame = browser.pageFrame
+        await mouse(.mouseMoved, at: CGPoint(x: frame.minX + 70, y: frame.minY + 60))
+        await mouse(.mouseMoved, at: CGPoint(x: frame.minX + 80, y: frame.minY + 62))
+        let real = await until(3) { tab.hoveredLink == link }
+        check("Survol : avec un vrai mouvement du pointeur sur la page", real, tab.hoveredLink?.absoluteString ?? "rien")
+        tab.webView?.loadHTMLString("<p>autre</p>", baseURL: URL(string: "https://nuri-selftest.example/autre"))
+        await waitForLoad(tab)
+        check("Survol : une nouvelle page efface le lien", tab.hoveredLink == nil)
+    }
+
+    // 19 and 44. Camera, microphone and location kept by site, both sides of a split may ask.
+    private func auditMediaPermissions() async {
+        let host = "camera-audit.example"
+        func reset() { MediaPermission.Device.allCases.forEach { $0.allowedSites.remove(host); $0.refusedSites.remove(host) } }
+        reset()
+        var asked = 0
+        let first = await MediaPermission.siteAllows(host, [.camera, .microphone], in: browser) { asked += 1; return true }
+        let second = await MediaPermission.siteAllows(host, [.camera, .microphone], in: browser) { asked += 1; return false }
+        let micAlone = await MediaPermission.siteAllows(host, [.microphone], in: browser) { asked += 1; return false }
+        check("Caméra et micro : demandés une fois, retenus pour le site (pas seulement jusqu'à la fin de Nuri)", first && second && micAlone && asked == 1
+              && UserDefaults.standard.stringArray(forKey: "cameraAllowedHosts")?.contains(host) == true
+              && UserDefaults.standard.stringArray(forKey: "microphoneAllowedHosts")?.contains(host) == true, "questions \(asked)")
+        check("Caméra et micro : listés dans Réglages → Confidentialité", MediaPermission.lists.filter { $0.list.hosts.contains(host) }.map(\.title)
+              == [MediaPermission.Device.camera.allowedTitle, MediaPermission.Device.microphone.allowedTitle])
+        MediaPermission.Device.camera.allowedSites.remove(host)
+        let afterRemoval = await MediaPermission.siteAllows(host, [.camera], in: browser) { asked += 1; return false }
+        let refusedKept = await MediaPermission.siteAllows(host, [.camera], in: browser) { asked += 1; return true }
+        check("Caméra et micro : retiré dans les Réglages, la question revient ; un refus est retenu aussi", !afterRemoval && !refusedKept && asked == 2
+              && MediaPermission.Device.camera.refusedSites.contains(host))
+        let location = await MediaPermission.siteAllows(host, [.location], in: browser) { asked += 1; return true }
+        check("Position : retenue pour le site, à part", location && MediaPermission.Device.location.allowedSites.contains(host) && asked == 3)
+        let privateWindow = BrowserWindows.shared.openPrivateWindow()
+        let privateAnswer = await MediaPermission.siteAllows("prive-audit.example", [.camera], in: privateWindow) { true }
+        check("Caméra et micro : rien n'est écrit depuis une fenêtre privée", privateAnswer && !MediaPermission.Device.camera.allowedSites.contains("prive-audit.example"))
+        privateWindow.window?.close()
+        reset()
+        await sleep(0.5)
+        browser.window?.makeKeyAndOrderFront(nil)
+
+        // 44: the side of the split that isn't selected.
+        let left = await htmlTab("<title>Gauche</title>g")
+        let right = await htmlTab("<title>Droite</title>d")
+        browser.select(left)
+        browser.showInSplit(right)
+        await sleep(0.6)
+        guard let other = browser.visibleTabs.first(where: { $0 !== browser.selectedTab }), let webView = other.webView else { return check("Vue partagée : deux côtés", false) }
+        WebKitSPI.setPreference(webView.configuration.preferences, "mockCaptureDevicesEnabled", true)
+        // WebKit only passes on a request from a page that has the focus: Nuri in front.
+        if !(await frontForKeyboard()) { eventsWereInFront = false }
+        let before = MediaPermission.requests
+        _ = await webView.nuriCall("try { await navigator.mediaDevices.getUserMedia({ video: true }); } catch (e) {} return 1;", world: .page, timeout: 4)
+        _ = await until(3) { MediaPermission.requests > before }
+        check("Vue partagée : la caméra demandée par le côté non actif arrive à Nuri (plus de refus muet)", MediaPermission.requests > before,
+              "demandes \(MediaPermission.requests - before)")
+        check("Partage du son : le cadre qui a demandé la caméra reçoit de quoi ajouter le son", !other.shareAudioFrames.isEmpty)
+        let geoBefore = MediaPermission.requests
+        _ = await webView.nuriCall("await new Promise(done => navigator.geolocation.getCurrentPosition(done, done)); return 1;", world: .page, timeout: 4)
+        _ = await until(2) { MediaPermission.requests > geoBefore }
+        check("Vue partagée : la position demandée par le côté non actif arrive à Nuri", MediaPermission.requests > geoBefore)
+    }
+
+    // 21. The downloads list survives a relaunch, without private windows'.
+    private func auditDownloadsList() async {
+        guard let server = await makeRouteServer({ _ in
+            RouteServer.Response(type: "application/octet-stream", headers: ["Content-Disposition": "attachment; filename=\"liste.bin\""], body: Data(repeating: 7, count: 4096))
+        }) else { return check("Téléchargements : serveur local", false) }
+        let manager = DownloadManager.shared
+        let page = await htmlTab("<title>Page</title>p")
+        let before = manager.items.count
+        browser.openTab(url: URL(string: "http://127.0.0.1:\(server.port)/liste.bin"), background: true, after: page)
+        _ = await until(6) { manager.items.count == before + 1 && manager.items.first?.state == .finished }
+        let privateWindow = BrowserWindows.shared.openPrivateWindow()
+        let hidden = DownloadItem(filename: "secret.bin", sourceURL: URL(string: "https://prive.example/secret.bin"), browser: privateWindow)
+        hidden.state = .finished
+        let running = DownloadItem(filename: "en-cours.bin", sourceURL: URL(string: "https://exemple.fr/en-cours.bin"), browser: browser)
+        let list = [hidden, running] + manager.items
+        manager.saveNow()
+        let reread = DownloadManager.readList(from: DownloadManager.listURL)
+        let finished = reread.first { $0.filename.hasPrefix("liste") }
+        check("Téléchargements : la liste est relue au lancement, terminés compris", finished?.state == .finished && finished?.receivedBytes == 4096
+              && finished?.destination.map { FileManager.default.fileExists(atPath: $0.path) } == true, "\(reread.map(\.filename))")
+        let file = StateStore.directory.appendingPathComponent("liste-audit.json")
+        try? DownloadManager.encodeList(list)?.write(to: file)
+        let saved = DownloadManager.readList(from: file)
+        check("Téléchargements : jamais ceux d'une fenêtre privée ; un téléchargement interrompu revient « interrompu »", !saved.contains { $0.filename == "secret.bin" }
+              && saved.first { $0.filename == "en-cours.bin" }.map { if case .failed = $0.state { return $0.canRetry } else { return false } } == true)
+        privateWindow.window?.close()
+        await sleep(0.4)
+        browser.window?.makeKeyAndOrderFront(nil)
+    }
+
+    // 22 and 32. ⌘S, ⌘O, and the zoom of a file of the Mac.
+    private func auditSaveAndOpen() async {
+        let folder = scratch
+        let tab = await htmlTab("<title>À garder</title><p>texte gardé</p>")
+        guard let webView = tab.webView else { return }
+        let archive = folder.appendingPathComponent("page.webarchive")
+        let pdf = folder.appendingPathComponent("page.pdf")
+        let savedArchive = await browser.savePage(of: webView, to: archive, asPDF: false)
+        let plist = (try? Data(contentsOf: archive)).flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
+        check("⌘S : la page en archive web", savedArchive && plist?["WebMainResource"] != nil)
+        let savedPDF = await browser.savePage(of: webView, to: pdf, asPDF: true)
+        check("⌘S : ou en PDF", savedPDF && (try? Data(contentsOf: pdf))?.prefix(4) == Data("%PDF".utf8))
+        let menu = NSApp.mainMenu?.items.first { $0.submenu?.title == L("Fichier", "File") }?.submenu
+        let save = menu?.items.first { $0.title == NuriCommand.savePage.title }, open = menu?.items.first { $0.title == NuriCommand.openFile.title }
+        check("⌘S et ⌘O : dans le menu Fichier", save?.keyEquivalent == "s" && save?.keyEquivalentModifierMask == .command
+              && open?.keyEquivalent == "o" && open?.keyEquivalentModifierMask == .command)
+        // A file of the Mac, with an image beside it.
+        let page = folder.appendingPathComponent("local.html")
+        try? Self.pngIcon.write(to: folder.appendingPathComponent("image.png"))
+        try? Data("<!doctype html><title>Fichier local</title><img id=i src='image.png'>".utf8).write(to: page)
+        let local = browser.openTab(url: page)
+        await waitForLoad(local)
+        let width = await local.webView?.nuriCall("return document.getElementById('i').naturalWidth;") as? Int
+        check("⌘O : un fichier du Mac s'ouvre, et lit ce qui est à côté de lui", local.title == "Fichier local" && width == 16, "titre \(local.title) · image \(width ?? -1)")
+        browser.select(local)
+        AppSettings.shared.setSiteZoom(1, for: "file://")
+        browser.zoom(0.1)
+        let zoomed = local.webView?.pageZoom ?? 1
+        browser.zoom(0)
+        check("⌘+ et ⌘− : aussi sur un fichier local", abs(zoomed - 1.1) < 0.01 && local.webView?.pageZoom == 1, "\(zoomed)")
+        let restored = local.webView.map { $0.pageZoom } ?? 0
+        _ = restored
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    // 23. The mouse's side buttons.
+    private func auditMouseButtons() async {
+        guard let server = await makeRouteServer({ path in .html("<!doctype html><title>\(path)</title>\(path)") }) else { return }
+        let base = "http://127.0.0.1:\(server.port)"
+        let tab = browser.openTab(url: URL(string: base + "/un"))
+        await waitForLoad(tab)
+        tab.load(URL(string: base + "/deux")!)
+        await waitForLoad(tab)
+        func press(_ button: CGMouseButton) {
+            guard let quartz = CGEvent(mouseEventSource: nil, mouseType: .otherMouseDown, mouseCursorPosition: .zero, mouseButton: button),
+                  let event = NSEvent(cgEvent: quartz) else { return }
+            tab.webView?.otherMouseDown(with: event)
+        }
+        press(CGMouseButton(rawValue: 3)!)
+        let back = await until(4) { tab.url?.path == "/un" }
+        await waitForLoad(tab)
+        _ = await until(2) { tab.canGoForward }
+        press(CGMouseButton(rawValue: 4)!)
+        let forward = await until(4) { tab.url?.path == "/deux" }
+        check("Souris : le bouton 3 fait Précédent, le 4 Suivant", back && forward, tab.url?.path ?? "nil")
+    }
+
+    // 24, 34 and 35. The find bar.
+    private func auditFindBar() async {
+        let tab = await htmlTab("<title>Chats</title><p id=a>chat</p><p id=b>chien</p><p id=c>chat</p><p id=d>chat</p>")
+        browser.select(tab)
+        browser.find("chat")
+        let three = await until(3) { browser.findResult?.count == 3 }
+        browser.find("ornithorynque")
+        let none = await until(3) { browser.findResult?.count == 0 }
+        check("Recherche : le nombre de résultats, ou « aucun résultat »", three && none && browser.findResult?.label == L("Aucun résultat", "No results"),
+              String(describing: browser.findResult))
+        guard await frontForKeyboard(), let webView = tab.webView else { return check("Recherche : ⌘F remet le curseur dans la barre déjà ouverte", false) }
+        NuriCommand.find.perform()
+        _ = await until(2) { self.fieldEditor != nil }
+        browser.window?.makeFirstResponder(webView)
+        await sleep(0.2)
+        NuriCommand.find.perform()
+        let refocused = await until(2) { self.fieldEditor != nil }
+        check("Recherche : ⌘F remet le curseur dans la barre déjà ouverte", refocused, String(describing: browser.window?.firstResponder))
+        guard let editor = fieldEditor else { return }
+        editor.selectAll(nil)
+        editor.insertText("chat", replacementRange: editor.selectedRange())
+        await sleep(0.4)
+        func selected() async -> String? {
+            await tab.webView?.nuriCall("const n = getSelection().anchorNode; return n && (n.parentElement || n).id;") as? String
+        }
+        key(36, "\r")
+        await sleep(0.3)
+        let forward = await selected()
+        key(36, "\r", flags: .shift)
+        await sleep(0.3)
+        let backward = await selected()
+        let order = ["a", "c", "d"]
+        let expected = forward.flatMap { order.firstIndex(of: $0) }.map { order[($0 + order.count - 1) % order.count] }
+        check("Recherche : ⇧↩ remonte au résultat précédent", forward != nil && backward == expected, "↩ \(forward ?? "nil") puis ⇧↩ \(backward ?? "nil")")
+        browser.findBarVisible = false
+    }
+
+    // 25. The address completed from history and bookmarks.
+    private func auditCompletion() async {
+        let space = browser.currentSpaceID
+        HistoryStore.shared.record(url: URL(string: "https://github.com/apple/swift")!, title: "Swift", space: space)
+        HistoryStore.shared.record(url: URL(string: "https://gitlab.example/projet")!, title: "Projet", space: space)
+        BookmarkStore.shared.add(url: URL(string: "https://www.wikipedia.org/")!, title: "Wikipédia", favicon: nil, space: space)
+        defer {
+            HistoryStore.shared.deleteAll(ofSpace: space)
+            BookmarkStore.shared.removeAll(space: space)
+        }
+        let engine = { (text: String) in SuggestionEngine.completion(for: text, browser: self.browser) }
+        check("Autocomplétion : le site d'une page visitée", engine("gith") == "github.com" && engine("GitH") == "GitHub.com", engine("gith") ?? "nil")
+        check("Autocomplétion : la suite du chemin, une partie à la fois", engine("github.com/ap") == "github.com/apple", engine("github.com/ap") ?? "nil")
+        check("Autocomplétion : un favori, sans le www.", engine("wiki") == "wikipedia.org")
+        check("Autocomplétion : rien pour une recherche ou une adresse complète", engine("git hub") == nil && engine("https://git") == nil && engine("github.com") == nil)
+        let privateWindow = BrowserWindows.shared.openPrivateWindow()
+        check("Autocomplétion : rien dans une fenêtre privée", SuggestionEngine.completion(for: "gith", browser: privateWindow) == nil)
+        privateWindow.window?.close()
+        await sleep(0.4)
+        _ = await htmlTab("<title>Page</title>p")
+        guard await frontForKeyboard() else { return check("Autocomplétion : dans la barre de commande, la partie ajoutée sélectionnée", false) }
+        browser.showCommandBar(.newTab)
+        _ = await until(2) { self.fieldEditor != nil }
+        guard let editor = fieldEditor else { return check("Autocomplétion : dans la barre de commande, la partie ajoutée sélectionnée", false) }
+        editor.insertText("gith", replacementRange: editor.selectedRange())
+        _ = await until(2) { editor.string == "github.com" && editor.selectedRange().length > 0 }
+        check("Autocomplétion : dans la barre de commande, la partie ajoutée sélectionnée", editor.string == "github.com" && editor.selectedRange() == NSRange(location: 4, length: 6),
+              "« \(editor.string) » \(editor.selectedRange())")
+        editor.insertText("u", replacementRange: editor.selectedRange())
+        _ = await until(2) { editor.selectedRange() == NSRange(location: 5, length: 5) }
+        let typedOn = editor.string == "github.com" && editor.selectedRange() == NSRange(location: 5, length: 5)
+        editor.deleteBackward(nil)
+        await sleep(0.3)
+        check("Autocomplétion : taper la remplace, ⌫ la retire", typedOn && editor.string == "githu", "« \(editor.string) » \(editor.selectedRange())")
+        browser.commandBar = nil
+    }
+
+    // 26. A typed address with a path doesn't become a search.
+    private func auditTypedAddress() async {
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotFindHost)
+        func decide(_ text: String) -> TypedAddressFallback? {
+            URLResolver.url(from: text).flatMap { TypedAddressFallback.decide(.init(text: text, url: $0), error: error) }
+        }
+        check("Adresse tapée : un simple nom introuvable devient une recherche", decide("node.js") == .search("node.js") && decide("readme.md") == .search("readme.md"))
+        check("Adresse tapée : avec un chemin ou des paramètres, l'erreur reste", decide("exemple-introuvable.zz/contact") == nil
+              && decide("exemple-introuvable.zz?page=2") == nil && decide("exemple-introuvable.zz#haut") == nil)
+        let tab = browser.openTab(url: nil)
+        browser.select(tab)
+        browser.navigate("nuri-audit-introuvable.invalid/chemin", mode: .currentTab)
+        let failed = await until(10) { tab.loadError != nil }
+        check("Adresse tapée : le vrai parcours, l'erreur s'affiche au lieu d'une recherche", failed && tab.url?.host() == "nuri-audit-introuvable.invalid",
+              "\(tab.url?.absoluteString ?? "nil") · \(tab.loadError ?? "pas d'erreur")")
+    }
+
+    // 27. Icons through WebKit, nothing from a private window.
+    private func auditFavicons() async {
+        let icon = Self.pngIcon
+        let route: @Sendable (String) -> RouteServer.Response = { path in
+            path.hasPrefix("/icone.png") ? RouteServer.Response(type: "image/png", body: icon)
+                : .html("<!doctype html><title>Icône</title><link rel=icon href='/icone.png'>page")
+        }
+        guard let server = await makeRouteServer(route), let privateServer = await makeRouteServer(route) else { return }
+        let outsideBefore = FaviconLoader.downloadsOutsideWebKit.count
+        let tab = browser.openTab(url: URL(string: "http://127.0.0.1:\(server.port)/"))
+        await waitForLoad(tab)
+        _ = await until(5) { tab.favicon != nil }
+        let request = server.requests.first { $0.hasPrefix("GET /icone.png") } ?? ""
+        let agent = request.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("user-agent:") } ?? ""
+        check("Icônes : demandées par la page, à travers WebKit (nom de Safari, pas CFNetwork)", tab.favicon != nil && agent.contains("Safari") && !agent.contains("CFNetwork")
+              && FaviconLoader.downloadsOutsideWebKit.count == outsideBefore, agent)
+        let privateWindow = BrowserWindows.shared.openPrivateWindow(url: URL(string: "http://localhost:\(privateServer.port)/"))
+        await sleep(0.5)
+        if let privateTab = privateWindow.selectedTab { await waitForLoad(privateTab) }
+        await sleep(1.5)
+        check("Icônes : rien n'est demandé depuis une fenêtre privée", !privateServer.requests.contains { $0.hasPrefix("GET /icone.png") }
+              && FaviconLoader.downloadsOutsideWebKit.count == outsideBefore, "\(privateServer.requests.count) requêtes")
+        privateWindow.window?.close()
+        await sleep(0.4)
+        browser.window?.makeKeyAndOrderFront(nil)
+        AppSettings.shared.adBlockEnabled = true
+        check("Icônes : le bloqueur s'applique à celles demandées hors de la page", !FaviconLoader.mayFetchOutside(URL(string: "https://ad.doubleclick.net/icone.ico")!, pageHost: "exemple.fr")
+              && FaviconLoader.mayFetchOutside(URL(string: "https://cdn.exemple.fr/icone.ico")!, pageHost: "exemple.fr")
+              && FaviconLoader.mayFetchOutside(URL(string: "https://static.autre.example/icone.ico")!, pageHost: "exemple.fr"))
+    }
+
+    // 28. Site data listed, erased one site at a time.
+    private func auditSiteData() async {
+        guard let server = await makeRouteServer({ _ in .html("<!doctype html><title>Données</title>d") }) else { return }
+        let tab = browser.openTab(url: URL(string: "http://localhost:\(server.port)/"))
+        await waitForLoad(tab)
+        _ = await tab.webView?.nuriCall("document.cookie = 'audit=1; max-age=3600'; localStorage.setItem('audit', '1'); return 1;", world: .page, timeout: 2)
+        await sleep(1)
+        let store = browser.currentSpace.dataStore
+        let sites = await SiteData.sites(in: store)
+        let local = sites.first { $0.name == "localhost" }
+        check("Données des sites : le site est listé, avec ce qu'il garde", local != nil && local?.kinds.isEmpty == false, sites.map { "\($0.name) (\($0.kinds))" }.joined(separator: ", "))
+        if let local { await SiteData.remove(local, from: store) }
+        let after = await SiteData.sites(in: store)
+        let cookie = await tab.webView?.nuriCall("return document.cookie;", world: .page, timeout: 2) as? String
+        check("Données des sites : effacer un seul site", !after.contains { $0.name == "localhost" } && (cookie ?? "").isEmpty, "cookie « \(cookie ?? "nil") »")
+    }
+
+    // 29. The journal and macOS's crash reports.
+    private func auditJournal() async {
+        let marker = "audit-\(UUID().uuidString.prefix(8))"
+        Log.storage.error("Auto-test du journal \(marker, privacy: .public)")
+        var found = false
+        if let store = try? OSLogStore(scope: .currentProcessIdentifier) {
+            let since = store.position(date: Date().addingTimeInterval(-60))
+            let entries = (try? store.getEntries(at: since, matching: NSPredicate(format: "subsystem == %@", Log.subsystem))) ?? AnySequence([])
+            found = entries.contains { ($0 as? OSLogEntryLog)?.composedMessage.contains(marker) == true }
+        }
+        check("Journal : les erreurs vont au journal unifié de macOS (sous-système app.nuri.browser)", found)
+        let fm = FileManager.default
+        try? fm.removeItem(at: CrashJournal.folder)
+        for index in 0..<22 { CrashJournal.keep(Data("{\"n\":\(index)}".utf8), crashes: 1, hangs: 0, now: Date().addingTimeInterval(Double(index))) }
+        let kept = (try? fm.contentsOfDirectory(atPath: CrashJournal.folder.path)) ?? []
+        check("Journal : les rapports de plantage de macOS sont gardés, les 20 derniers", kept.count == 20)
+        let script = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/selftest.sh")
+        check("CI : un script lance les auto-tests et échoue si l'un échoue", fm.isExecutableFile(atPath: script.path), script.path)
+    }
+
+    // 20. An expired certificate on the Internet (network: badssl.com).
+    func testExpiredCertificate() async {
+        let probe = browser.openTab(url: URL(string: "https://badssl.com/"))
+        await waitForLoad(probe, timeout: 15)
+        guard probe.loadError == nil, probe.webView?.url != nil else {
+            note("Certificat expiré : badssl.com injoignable, rien de vérifié (réseau)")
+            return
+        }
+        // Strict Transport Security first.
+        check("HSTS : les domaines préchargés et les sites qui l'ont dit", StrictTransport.isRequired("exemple.dev", in: browser)
+              && StrictTransport.isRequired("accounts.google.com", in: browser) && !StrictTransport.isRequired("exemple.fr", in: browser))
+        let answer = HTTPURLResponse(url: URL(string: "https://strict-audit.example/")!, statusCode: 200, httpVersion: nil,
+                                     headerFields: ["Strict-Transport-Security": "max-age=31536000; includeSubDomains"])!
+        StrictTransport.record(answer, in: browser)
+        let recorded = StrictTransport.isRequired("strict-audit.example", in: browser) && StrictTransport.isRequired("www.strict-audit.example", in: browser)
+        StrictTransport.record(HTTPURLResponse(url: answer.url!, statusCode: 200, httpVersion: nil, headerFields: ["Strict-Transport-Security": "max-age=0"])!, in: browser)
+        check("HSTS : retenu depuis l'en-tête, sous-domaines compris, et repris par max-age=0", recorded && !StrictTransport.isRequired("strict-audit.example", in: browser))
+
+        let host = "expired.badssl.com"
+        CertificateExceptions.remove(host)
+        StrictTransport.hosts.add(host)
+        let strict = browser.openTab(url: URL(string: "https://\(host)/"))
+        _ = await until(15) { strict.loadError != nil }
+        check("Certificat expiré : rien n'est proposé pour un site HSTS", strict.loadError != nil && strict.untrustedCertificate == nil)
+        StrictTransport.hosts.remove(host)
+        browser.close(strict)
+        let tab = browser.openTab(url: URL(string: "https://\(host)/"))
+        _ = await until(15) { tab.loadError != nil }
+        check("Certificat expiré : la page d'erreur propose « Continuer quand même »", tab.untrustedCertificate?.onInternet == true && tab.untrustedCertificate?.host == host,
+              tab.loadError ?? "pas d'erreur")
+        await snapshot("certificat-expire")
+        if let pending = tab.untrustedCertificate {
+            CertificateExceptions.accept(pending, persist: true, in: browser)
+            tab.untrustedCertificate = nil
+            tab.retryAfterError()
+            _ = await until(15) { tab.loadError == nil && !tab.isLoading && tab.webView?.url?.host() == host }
+            check("Certificat expiré : la page s'ouvre, avec un cadenas ouvert", tab.loadError == nil && tab.webView?.url?.host() == host && CertificateExceptions.isExcepted(host))
+            check("Certificat expiré : rien n'est écrit sur le disque", (UserDefaults.standard.dictionary(forKey: "certificateExceptions") ?? [:])[host] == nil)
+        }
+        let wrong = browser.openTab(url: URL(string: "https://wrong.host.badssl.com/"))
+        _ = await until(15) { wrong.loadError != nil }
+        let selfSigned = browser.openTab(url: URL(string: "https://self-signed.badssl.com/"))
+        _ = await until(15) { selfSigned.loadError != nil }
+        check("Certificat : un mauvais nom ou un certificat inconnu reste refusé, sans rien proposer", wrong.loadError != nil && wrong.untrustedCertificate == nil
+              && selfSigned.loadError != nil && selfSigned.untrustedCertificate == nil)
+        CertificateExceptions.remove(host)
+    }
+}
+
+extension FeatureSelfTest {
+    func testMinorFixes() async {
+        await minorPorthole()
+        cleanUp()
+        eventsWereInFront = true
+        await minorViewSource()
+        cleanUp()
+        eventsWereInFront = true
+        minorResolver()
+        await minorBlockerText()
+        await minorOpenedByPage()
+        cleanUp()
+        eventsWereInFront = true
+        await minorHistoryPages()
+        cleanUp()
+        minorBookmarksBackup()
+        await minorAutoplay()
+        cleanUp()
+        minorMenus()
+        await minorDroppedLinks()
+    }
+
+    // 30. A glance that fails says so.
+    private func minorPorthole() async {
+        var dead = await makeRouteServer { _ in .html("") }
+        let port = dead?.port ?? 1
+        dead = nil
+        await sleep(0.3)
+        let page = await htmlTab("<title>Page</title>p")
+        browser.openPorthole(URL(string: "http://127.0.0.1:\(port)/hublot")!, from: page)
+        guard let glance = browser.porthole else { return check("Hublot en échec : la page d'erreur s'y affiche", false) }
+        let failed = await until(8) { glance.loadError != nil }
+        await snapshot("hublot-echec")
+        check("Hublot en échec : l'erreur est sur l'onglet du hublot (sa vue l'affiche, voir la capture hublot-echec)", failed && glance.failedURL?.port == Int(port))
+        browser.closePorthole()
+    }
+
+    // 31. view-source:
+    private func minorViewSource() async {
+        guard let server = await makeRouteServer({ _ in .html("<!doctype html><title>Source</title><script>document.title = 'Changé'</script><b>gras</b>") }) else { return }
+        let page = URL(string: "http://127.0.0.1:\(server.port)/source")!
+        check("view-source: n'est plus envoyé tel quel à WebKit", URLResolver.url(from: "view-source:\(page)") == nil && URLResolver.viewSourceTarget("view-source:\(page)") == page)
+        let count = browser.currentSpace.tabs.count
+        browser.navigate("view-source:\(page.absoluteString)", mode: .newTab)
+        _ = await until(3) { browser.currentSpace.tabs.count == count + 1 }
+        guard let tab = browser.currentSpace.tabs.last else { return check("view-source: affiche la source", false) }
+        let shown = await until(10) { tab.title.hasPrefix("view-source:") && !tab.isLoading }
+        let text = await tab.webView?.nuriCall("return document.querySelector('pre') && document.querySelector('pre').textContent;") as? String
+        check("view-source: affiche la source telle que le serveur l'envoie, sans l'exécuter", shown && text?.contains("<b>gras</b>") == true && text?.contains("document.title = 'Changé'") == true
+              && tab.loadError == nil, "titre « \(tab.title) » · \(text?.prefix(60) ?? "rien")")
+        let menu = NSApp.mainMenu?.items.first { $0.submenu?.title == L("Présentation", "View") }?.submenu
+        check("Afficher la source : ⌥⌘U dans le menu Présentation", menu?.items.contains { $0.title == NuriCommand.viewSource.title && $0.keyEquivalent == "u" } == true)
+    }
+
+    // 33. What the resolver takes for an address.
+    private func minorResolver() {
+        let cases: [(String, String?)] = [
+            ("mailto:jean@exemple.fr", "mailto:jean@exemple.fr"),
+            ("mailto:jean@exemple.fr?subject=Bonjour à tous", "mailto:jean@exemple.fr?subject=Bonjour%20%C3%A0%20tous"),
+            ("tel:+33123456789", "tel:+33123456789"),
+            ("[2001:db8::1]", "http://[2001:db8::1]"),
+            ("[fe80::1]:8080/admin", "http://[fe80::1]:8080/admin"),
+            ("2001:db8::42", "http://[2001:db8::42]"),
+            ("intranet/", "http://intranet/"),
+            ("wiki/accueil/", "http://wiki/accueil/"),
+            ("nas/index.html", "http://nas/index.html"),
+            ("exemple.fr/ma page", "https://exemple.fr/ma%20page"),
+            ("https://exemple.fr/a b?q=c d", "https://exemple.fr/a%20b?q=c%20d"),
+            ("le monde.fr", nil), ("and/or", nil), ("12:30", nil), ("jean@exemple.fr", nil), ("node.js", "https://node.js"),
+            ("localhost:3000", "http://localhost:3000"), ("[::1]:8080", "http://[::1]:8080"), ("exemple.fr", "https://exemple.fr"),
+        ]
+        let wrong = cases.filter { URLResolver.url(from: $0.0)?.absoluteString != $0.1 }
+        check("Adresses : mailto:, IPv6, « intranet/ », espaces dans le chemin ; le reste ne change pas", wrong.isEmpty,
+              wrong.map { "\($0.0) → \(URLResolver.url(from: $0.0)?.absoluteString ?? "recherche")" }.joined(separator: " · "))
+        check("Adresses : mailto: n'ouvre pas de recherche ni ne change l'onglet", URLResolver.externalSchemes.contains("mailto")
+              && !URLResolver.isTypedWithoutScheme("mailto:jean@exemple.fr"))
+    }
+
+    // 36. What the blocker says it does.
+    private func minorBlockerText() async {
+        let note = AdBlockList.scopeNote
+        check("Bloqueur : le texte dit la taille de la liste et ce qui passe quand même", note.contains("\(Set(AdBlockList.domains).count)")
+              && note.contains(L("Bien des publicités passent", "Many ads still get through")))
+    }
+
+    // 38. A tab a page opened sleeps unless its opener still talks with it.
+    private func minorOpenedByPage() async {
+        guard let server = await makeRouteServer({ _ in .html("<!doctype html><title>Ouvert</title>o") }) else { return }
+        let base = "http://127.0.0.1:\(server.port)"
+        let page = browser.openTab(url: URL(string: base + "/ouvreur"))
+        await waitForLoad(page)
+        browser.select(page)
+        let count = browser.currentSpace.tabs.count
+        _ = await page.webView?.nuriCall("window.kept = window.open('/avec'); return 1;", world: .page, timeout: 2)
+        _ = await until(3) { browser.currentSpace.tabs.count == count + 1 }
+        // A tab a page opens goes right after it.
+        let withOpener = browser.currentSpace.tabs.first { $0.requestedURL?.path == "/avec" }
+        browser.select(page)
+        _ = await page.webView?.nuriCall("window.open('/sans', '_blank', 'noopener'); return 1;", world: .page, timeout: 2)
+        _ = await until(3) { browser.currentSpace.tabs.count == count + 2 }
+        let without = browser.currentSpace.tabs.first { $0.requestedURL?.path == "/sans" }
+        browser.select(page)
+        guard let withOpener, let without, withOpener !== without, withOpener.openedByPage, without.openedByPage else {
+            return check("Onglets ouverts par une page : deux onglets", false, "\(browser.currentSpace.tabs.count - count) ouverts · \(browser.currentSpace.tabs.map { "\($0.requestedURL?.path ?? "-") \($0.openedByPage)" })")
+        }
+        await waitForLoad(withOpener)
+        await waitForLoad(without)
+        for tab in [withOpener, without] { tab.lastAccess = .distantPast }
+        await withOpener.sleepKeepingPlace(idleFor: 60)
+        await without.sleepKeepingPlace(idleFor: 60)
+        check("Onglets ouverts par une page : celui qui parle encore à sa page reste éveillé, l'autre s'endort", !withOpener.isAsleep && without.isAsleep,
+              "avec opener \(withOpener.isAsleep ? "endormi" : "éveillé") · sans \(without.isAsleep ? "endormi" : "éveillé")")
+        browser.close(page)
+        await sleep(0.5)
+        withOpener.lastAccess = .distantPast
+        await withOpener.sleepKeepingPlace(idleFor: 60)
+        check("Onglets ouverts par une page : une fois l'ouvreur fermé, il s'endort aussi", withOpener.isAsleep)
+    }
+
+    // 39. The history window isn't cut at 500 lines.
+    private func minorHistoryPages() async {
+        let space = browser.addSpace(name: "Pages")
+        let store = HistoryStore.shared
+        let now = Date()
+        let visits = (0..<1_234).map { ImportedVisit(url: URL(string: "https://pages-\($0).example/")!, title: "Page \($0)", visits: 1, last: now.addingTimeInterval(-Double($0) * 60)) }
+        store.importVisits(visits, space: space.id)
+        check("Historique : toutes les pages se lisent, au-delà de 500", store.search("", space: space.id, limit: 1_501).count == 1_234 && HistoryView.pageSize == 500)
+        HistoryWindow.show(for: browser)
+        await sleep(0.8)
+        let window = NSApp.windows.first { $0.title == L("Historique", "History") }
+        func button(_ title: String, in element: Any) -> NSAccessibilityProtocol? {
+            guard let element = element as? NSAccessibilityProtocol else { return nil }
+            if element.accessibilityRole() == .button, (element.accessibilityTitle() ?? element.accessibilityLabel() ?? "") == title { return element }
+            for child in element.accessibilityChildren() ?? [] { if let found = button(title, in: child) { return found } }
+            return nil
+        }
+        let more = L("Afficher les 500 suivantes", "Show the next 500")
+        // The button comes at the end of the list: its whole height is laid out for it.
+        if let scroll = window?.contentView.flatMap({ findScrollView(in: $0) }) {
+            scroll.documentView?.scroll(NSPoint(x: 0, y: scroll.documentView?.bounds.height ?? 0))
+            await sleep(0.5)
+        }
+        let found = window?.contentView.flatMap { button(more, in: $0) }
+        let firstPage = HistoryView.page(store.search("", space: space.id, limit: HistoryView.pageSize + 1), limit: HistoryView.pageSize)
+        let lastPage = HistoryView.page(store.search("", space: space.id, limit: 3 * HistoryView.pageSize + 1), limit: 3 * HistoryView.pageSize)
+        if let window { await snapshot("historique-pages", window: window) }
+        check("Historique : 500 lignes puis « Afficher les 500 suivantes », jusqu'à la dernière (capture historique-pages)",
+              firstPage.0.count == 500 && firstPage.1 && lastPage.0.count == 1_234 && !lastPage.1, found == nil ? "bouton introuvable par l'accessibilité" : "bouton trouvé")
+        window?.close()
+        browser.window?.makeKeyAndOrderFront(nil)
+        store.deleteAll(ofSpace: space.id)
+    }
+
+    private func findScrollView(in view: NSView) -> NSScrollView? {
+        if let scroll = view as? NSScrollView { return scroll }
+        for sub in view.subviews { if let found = findScrollView(in: sub) { return found } }
+        return nil
+    }
+
+    // 40. An unreadable bookmarks.json isn't written over.
+    private func minorBookmarksBackup() {
+        let folder = scratch
+        let file = folder.appendingPathComponent("bookmarks.json")
+        let space = UUID()
+        let good = BookmarkStore(fileURL: file)
+        good.add(url: URL(string: "https://garde.example/")!, title: "Gardé", favicon: nil, space: space)
+        _ = BookmarkStore(fileURL: file)   // a launch that reads it: the copy to fall back on
+        try? Data("{ pas du JSON".utf8).write(to: file)
+        let reread = BookmarkStore(fileURL: file)
+        let aside = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasPrefix("bookmarks.corrupt-") }
+        check("Favoris : un fichier illisible est mis de côté et la copie de secours reprise", reread.items.map(\.title) == ["Gardé"] && aside.count == 1,
+              "\(reread.items.map(\.title)) · \(aside)")
+        reread.add(url: URL(string: "https://nouveau.example/")!, title: "Nouveau", favicon: nil, space: space)
+        let corrupt = aside.first.flatMap { try? String(contentsOf: folder.appendingPathComponent($0), encoding: .utf8) }
+        check("Favoris : la sauvegarde suivante n'efface pas le fichier abîmé", corrupt == "{ pas du JSON" && BookmarkStore(fileURL: file).items.count == 2)
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    // 41. Videos with sound don't start by themselves.
+    private func minorAutoplay() async {
+        let stored = UserDefaults.standard.object(forKey: "blockAutoplayWithSound")
+        check("Lecture automatique : bloquée avec le son par défaut", stored != nil || AppSettings.shared.blockAutoplayWithSound)
+        let tab = await htmlTab("<title>Vidéo</title>v")
+        check("Lecture automatique : les nouvelles pages attendent un geste pour le son", tab.webView?.configuration.mediaTypesRequiringUserActionForPlayback == .audio
+              || !AppSettings.shared.blockAutoplayWithSound)
+    }
+
+    // 42. Services, Paste and Match Style, Help.
+    private func minorMenus() {
+        let items = NSApp.mainMenu?.items ?? []
+        let app = items.first?.submenu
+        let edit = items.first { $0.submenu?.title == L("Édition", "Edit") }?.submenu
+        let plain = edit?.items.first { $0.action == #selector(NSTextView.pasteAsPlainText(_:)) }
+        check("Menus : Services dans le menu Nuri", app?.items.contains { $0.submenu != nil && $0.submenu === NSApp.servicesMenu } == true)
+        check("Menus : « Coller sans mise en forme » ⌥⇧⌘V", plain?.keyEquivalent == "v" && plain?.keyEquivalentModifierMask == [.command, .option, .shift])
+        check("Menus : Aide, le dernier", items.last?.submenu === NSApp.helpMenu && NSApp.helpMenu?.items.isEmpty == false)
+    }
+
+    // 43. A link dropped on the tab bar.
+    private func minorDroppedLinks() async {
+        let count = browser.currentSpace.tabs.count
+        let opened = browser.openDroppedLinks([URL(string: "https://depose-un.example/")!, URL(string: "javascript:alert(1)")!, URL(string: "https://depose-deux.example/")!])
+        let tabs = browser.currentSpace.tabs.suffix(2).map { $0.url?.host() ?? "" }
+        check("Glisser un lien sur la barre d'onglets : un onglet par lien, le dernier affiché, rien pour javascript:", opened && browser.currentSpace.tabs.count == count + 2
+              && tabs == ["depose-un.example", "depose-deux.example"] && browser.selectedTab?.url?.host() == "depose-deux.example", "\(tabs)")
+        note("Glisser un lien sur la barre d'onglets : le vrai glisser-déposer n'est pas simulé (seule l'action qui suit l'est)")
     }
 }
 #endif

@@ -129,7 +129,8 @@ final class AppSettings {
         sidePanelWidth = d.object(forKey: "sidePanelWidth") as? Double ?? ExtensionSidePanel.defaultWidth
         sidePanelOnLeft = d.bool(forKey: "sidePanelOnLeft")
         autoMeetingPiP = d.object(forKey: "autoMeetingPiP") as? Bool ?? true
-        blockAutoplayWithSound = d.bool(forKey: "blockAutoplayWithSound")
+        // A video that starts speaking by itself is a surprise nobody asked for: off unless chosen.
+        blockAutoplayWithSound = d.object(forKey: "blockAutoplayWithSound") as? Bool ?? true
         shareScreenAudio = d.bool(forKey: "shareScreenAudio")
         siteZooms = d.dictionary(forKey: "siteZooms") as? [String: Double] ?? [:]
         adBlockEnabled = d.object(forKey: "adBlockEnabled") as? Bool ?? true

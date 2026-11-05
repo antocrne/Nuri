@@ -68,6 +68,8 @@ struct TabStrip: View {
                     .background(TitleBarDragArea())
                 }
                 .scrollDisabled(browser.carry != nil)
+                // A link dragged from a page, a file or another app: a new tab for it.
+                .dropDestination(for: URL.self) { urls, _ in browser.openDroppedLinks(urls) }
                 .onChange(of: browser.selectedTab?.id) { _, id in
                     if let id { withAnimation(Theme.quick) { reader.scrollTo(id) } }
                 }

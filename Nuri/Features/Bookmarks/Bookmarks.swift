@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 import Observation
 
@@ -16,21 +17,53 @@ struct Bookmark: Identifiable, Codable, Equatable {
 }
 
 /// bookmarks.json, next to the session. Shared by every normal window; private windows don't use it.
+/// As for the session (StateStore), a file that can't be read whole is never written over: it is set
+/// aside, and the copy taken at the last launch that read it is used instead.
 @MainActor @Observable
 final class BookmarkStore {
     static let shared = BookmarkStore()
     private(set) var items: [Bookmark] = []
-    @ObservationIgnored private let fileURL = StateStore.directory.appendingPathComponent("bookmarks.json")
+    @ObservationIgnored private let fileURL: URL
+    @ObservationIgnored private var backupURL: URL { fileURL.deletingPathExtension().appendingPathExtension("backup.json") }
 
-    private init() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let saved = try? JSONDecoder().decode([Lossy<Bookmark>].self, from: data) else { return }
-        items = saved.compactMap(\.value)
+    /// `fileURL`: the self-test reads its own.
+    init(fileURL: URL = StateStore.directory.appendingPathComponent("bookmarks.json")) {
+        self.fileURL = fileURL
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: fileURL.path) else { return }   // none yet
+        if let data = try? Data(contentsOf: fileURL), let saved = try? JSONDecoder().decode([Lossy<Bookmark>].self, from: data) {
+            items = saved.compactMap(\.value)
+            if items.count == saved.count {
+                // Known good: the copy to fall back on.
+                try? fm.removeItem(at: backupURL)
+                try? fm.copyItem(at: fileURL, to: backupURL)
+            } else {
+                // Some couldn't be read: the file as it was is kept, the next save leaves them out.
+                setAside()
+            }
+            return
+        }
+        setAside()
+        if let data = try? Data(contentsOf: backupURL), let saved = try? JSONDecoder().decode([Lossy<Bookmark>].self, from: data) {
+            items = saved.compactMap(\.value)
+        }
+    }
+
+    /// The file as it was, next to it, under a name that doesn't get written over.
+    private func setAside() {
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let aside = fileURL.deletingLastPathComponent().appendingPathComponent("bookmarks.corrupt-\(stamp)-\(UUID().uuidString.prefix(4)).json")
+        try? FileManager.default.copyItem(at: fileURL, to: aside)
+        Log.storage.error("Favoris illisibles en tout ou partie, gardés à part (\(aside.lastPathComponent, privacy: .public))")
     }
 
     private func save() {
         guard let data = try? JSONEncoder().encode(items) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        do {
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            Log.storage.error("Favoris non écrits : \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     func favorites(space: UUID) -> [Bookmark] { items.filter { $0.spaceID == space && $0.isFavorite } }
@@ -71,6 +104,20 @@ final class BookmarkStore {
         guard let i = items.firstIndex(where: { $0.id == id }), items[i].isFavorite != isFavorite else { return }
         items[i].isFavorite = isFavorite
         save()
+    }
+
+    /// Pages kept in another browser (BrowserImport), at the end of the list, those already here
+    /// left out. One write for all of them. Returns how many were added.
+    @discardableResult
+    func importBookmarks(_ list: [ImportedBookmark], space: UUID) -> Int {
+        var known = Set(items.filter { $0.spaceID == space }.map(\.url.absoluteString))
+        var added = 0
+        for imported in list where known.insert(imported.url.absoluteString).inserted {
+            items.append(Bookmark(spaceID: space, url: imported.url, title: imported.title))
+            added += 1
+        }
+        if added > 0 { save() }
+        return added
     }
 
     /// A deleted space takes its bookmarks with it.

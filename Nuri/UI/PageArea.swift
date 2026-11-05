@@ -100,6 +100,11 @@ private struct PageCover: View {
             } else if let error = tab.loadError {
                 LoadErrorView(tab: tab, message: error)
             }
+            if let link = tab.hoveredLink, tab.reader == nil, !tab.isInFloatingPlayer {
+                LinkStatus(url: link)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .allowsHitTesting(false)
+            }
             if let request = tab.request {
                 TabRequestBar(tab: tab, request: request)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -131,12 +136,34 @@ private struct FloatingPlaceholder: View {
     }
 }
 
-/// What takes the place of a page: its reason, and what can be done about it.
-private struct PageNotice<Buttons: View>: View {
+/// The address of the link under the pointer, at the bottom of the page, as in every browser.
+private struct LinkStatus: View {
+    let url: URL
+
+    var body: some View {
+        Text(url.absoluteString)
+            .font(.system(size: 11.5))
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(Theme.hairline))
+            .frame(maxWidth: 520, alignment: .leading)
+            .padding(6)
+            .accessibilityLabel(L("Lien : \(url.absoluteString)", "Link: \(url.absoluteString)"))
+    }
+}
+
+/// What takes the place of a page: its reason, and what can be done about it. `footer`: a quieter
+/// way out, under the buttons.
+private struct PageNotice<Buttons: View, Footer: View>: View {
     let symbol: String
     let title: String
     let message: String
     @ViewBuilder let buttons: Buttons
+    @ViewBuilder var footer: Footer
 
     var body: some View {
         VStack(spacing: 12) {
@@ -144,31 +171,58 @@ private struct PageNotice<Buttons: View>: View {
             Text(title).font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.text)
             Text(message).font(.system(size: 12.5)).foregroundStyle(Theme.secondaryText).multilineTextAlignment(.center).frame(maxWidth: 420)
             HStack { buttons }
+            footer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(RoundedRectangle(cornerRadius: Metrics.pageRadius, style: .continuous).fill(Theme.pageBackdrop))
     }
 }
 
-private struct LoadErrorView: View {
+extension PageNotice where Footer == EmptyView {
+    init(symbol: String, title: String, message: String, @ViewBuilder buttons: () -> Buttons) {
+        self.init(symbol: symbol, title: title, message: message, buttons: buttons, footer: { EmptyView() })
+    }
+}
+
+/// Also in the Porthole: a glance that fails says so.
+struct LoadErrorView: View {
     let tab: Tab
     let message: String
 
     var body: some View {
-        PageNotice(symbol: "cloud.drizzle", title: L("Cette page n'a pas pu s'ouvrir", "This page couldn't open"), message: message) {
-            Button(L("Réessayer", "Try Again")) {
-                tab.loadError = nil
-                if let url = tab.url ?? tab.requestedURL { tab.load(url) }
+        let pending = tab.untrustedCertificate
+        PageNotice(symbol: pending?.onInternet == true ? "lock.trianglebadge.exclamationmark" : "cloud.drizzle",
+                   title: L("Cette page n'a pas pu s'ouvrir", "This page couldn't open"), message: text(pending)) {
+            Button(L("Réessayer", "Try Again")) { tab.retryAfterError() }
+            if let pending, !pending.onInternet {
+                Button(L("Continuer vers \(pending.host)", "Continue to \(pending.host)")) { accept(pending) }
             }
-            if let pending = tab.untrustedCertificate {
-                Button(L("Continuer vers \(pending.host)", "Continue to \(pending.host)")) {
-                    CertificateExceptions.accept(pending, persist: !tab.isPrivate)
-                    tab.loadError = nil
-                    tab.untrustedCertificate = nil
-                    if let url = tab.url ?? tab.requestedURL { tab.load(url) }
-                }
+        } footer: {
+            // Expired on the Internet: possible, but not what the page invites.
+            if let pending, pending.onInternet {
+                Button(L("Continuer quand même vers \(pending.host)", "Continue to \(pending.host) Anyway")) { accept(pending) }
+                    .buttonStyle(.link)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.faintText)
+                    .help(L("Pour cette fois : jusqu'à ce que Nuri quitte, rien n'est retenu.", "This time only: until Nuri quits, nothing is kept."))
             }
         }
+    }
+
+    private func text(_ pending: CertificateExceptions.Pending?) -> String {
+        var lines = [message]
+        if let pending, pending.onInternet {
+            lines.append(L("Le certificat de \(pending.host) a expiré, ou n'est pas encore valable : la connexion serait chiffrée, mais rien ne garantit plus qu'elle mène au vrai site.",
+                           "The certificate of \(pending.host) has expired, or isn't valid yet: the connection would be encrypted, but nothing guarantees any more that it leads to the real site."))
+        }
+        if let failed = tab.failedURL, failed != tab.url { lines.append(failed.absoluteString) }
+        return lines.joined(separator: "\n")
+    }
+
+    private func accept(_ pending: CertificateExceptions.Pending) {
+        CertificateExceptions.accept(pending, persist: !tab.isPrivate, in: tab.browser)
+        tab.untrustedCertificate = nil
+        tab.retryAfterError()
     }
 }
 
@@ -512,7 +566,7 @@ struct ToastView: View {
     }
 }
 
-/// Find in page (⌘F).
+/// Find in page (⌘F): ↩ the next match, ⇧↩ the previous one; how many there are, or none.
 struct FindBar: View {
     @Environment(BrowserModel.self) private var browser
     @State private var text = ""
@@ -527,8 +581,21 @@ struct FindBar: View {
                 .frame(width: 180)
                 .focused($focused)
                 .onSubmit { browser.find(text) }
+                // ⇧↩: onSubmit doesn't say which modifiers were down, the key itself does.
+                .onKeyPress(.return, phases: .down) { press in
+                    guard press.modifiers.contains(.shift) else { return .ignored }
+                    browser.find(text, backwards: true)
+                    return .handled
+                }
                 .onChange(of: text) { _, value in browser.find(value) }
                 .onExitCommand { close() }
+            if let found = browser.findResult, !text.isEmpty {
+                Text(found.label)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(found.count == 0 ? Theme.danger : Theme.faintText)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
             ChromeButton(symbol: "chevron.up", help: L("Précédent (⌘⇧G)", "Previous (⌘⇧G)"), size: 22, iconSize: 10) { browser.find(text, backwards: true) }
             ChromeButton(symbol: "chevron.down", help: L("Suivant (⌘G)", "Next (⌘G)"), size: 22, iconSize: 10) { browser.find(text) }
             ChromeButton(symbol: "xmark", help: L("Fermer (Échap)", "Close (Esc)"), size: 22, iconSize: 10) { close() }
@@ -540,10 +607,9 @@ struct FindBar: View {
         .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Theme.hairline))
         .shadow(color: Theme.shadow, radius: 8, y: 3)
         .padding(12)
-        .onAppear {
-            text = browser.lastFindText
-            focused = true
-        }
+        .onAppear { text = browser.lastFindText }
+        // ⌘F with the bar already out puts the keyboard back in it.
+        .task(id: browser.findFieldFocus) { await giveFocus($focused, in: browser) }
     }
 
     private func close() {

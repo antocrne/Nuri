@@ -1,4 +1,5 @@
 import Foundation
+import os
 import WebKit
 
 /// Compiles and installs Nuri's WKContentRuleList on the shared content controller: ad and tracker
@@ -105,7 +106,12 @@ final class ContentRules {
 
     private func lookupOrCompile(identifier: String, json: String) async -> WKContentRuleList? {
         if let cached = try? await store.contentRuleList(forIdentifier: identifier) { return cached }
-        return try? await store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: json)
+        do {
+            return try await store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: json)
+        } catch {
+            Log.blocker.error("Liste du bloqueur refusée par WebKit : \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     private static func hash(_ string: String) -> String {

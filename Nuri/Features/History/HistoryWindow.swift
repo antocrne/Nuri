@@ -31,17 +31,26 @@ enum HistoryWindow {
     }
 }
 
-private struct HistoryView: View {
+struct HistoryView: View {
     let spaces: [Space]
     let browser: BrowserModel
     @State private var query = ""
     /// nil: every space.
     @State private var spaceID: UUID?
+    /// How many lines are shown: a page more at each « Afficher plus ».
+    @State private var limit = Self.pageSize
+    static let pageSize = 500
+
+    /// What is shown of `found` (asked with one more than `limit`), and whether a page more exists.
+    static func page(_ found: [HistoryEntry], limit: Int) -> ([HistoryEntry], Bool) {
+        (Array(found.prefix(limit)), found.count > limit)
+    }
 
     var body: some View {
         let store = HistoryStore.shared
         let _ = store.revision
-        let entries = store.search(query, space: spaceID, limit: 500)
+        // One more than shown: whether there are others.
+        let (entries, hasMore) = Self.page(store.search(query, space: spaceID, limit: limit + 1), limit: limit)
         let days = Dictionary(grouping: entries) { Calendar.current.startOfDay(for: $0.lastVisit) }
         VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -91,12 +100,19 @@ private struct HistoryView: View {
                                     .background(Color(nsColor: Theme.frameNS))
                             }
                         }
+                        if hasMore {
+                            Button(L("Afficher les \(Self.pageSize) suivantes", "Show the next \(Self.pageSize)")) { limit += Self.pageSize }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                        }
                     }
                 }
             }
         }
         .background(Color(nsColor: Theme.frameNS))
         .ignoresSafeArea()
+        .onChange(of: query) { limit = Self.pageSize }
+        .onChange(of: spaceID) { limit = Self.pageSize }
     }
 
     private func confirmErase(_ range: HistoryStore.Range) {

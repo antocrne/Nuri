@@ -38,6 +38,24 @@ final class ShareAudio: NSObject, WKScriptMessageHandlerWithReply {
 
     @MainActor var isSharing: Bool { receiver != nil }
 
+    /// A frame is given the page-side wrapper of getDisplayMedia only when it asks for the camera or
+    /// the microphone (a call, the pages that share their screen): put on every page, the wrapper
+    /// would tell any site it is in Nuri (getDisplayMedia.toString() isn't native code any more).
+    @MainActor func prepare(_ tab: Tab, frame: WKFrameInfo) async {
+        guard let webView = tab.webView, tab.shareAudioFrames.insert(Self.key(of: frame)).inserted else { return }
+        _ = await webView.nuriCall(Scripts.shareAudioPage + "\nreturn true;", in: frame, world: .page, timeout: 2)
+    }
+
+    /// Whether `frame` can be given the sound: it has the wrapper.
+    @MainActor func isPrepared(_ tab: Tab, frame: WKFrameInfo) -> Bool {
+        tab.shareAudioFrames.contains(Self.key(of: frame))
+    }
+
+    @MainActor private static func key(of frame: WKFrameInfo) -> String {
+        let origin = frame.securityOrigin
+        return "\(frame.isMainFrame)|\(origin.protocol)://\(origin.host):\(origin.port)"
+    }
+
     /// The user accepted to share the screen of `tab` with its sound: the page may ask for it once,
     /// once macOS's picker is closed.
     @MainActor func allow(_ tab: Tab) {

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// On-disk session: spaces, pinned tabs, folders of tabs and (optionally) regular tabs.
 /// Decoding is tolerant (see the extensions below): a missing or unknown field, or one bad tab,
@@ -217,6 +218,7 @@ enum StateStore {
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let corrupt = sessionDirectory.appendingPathComponent("session.corrupt-\(stamp)-\(UUID().uuidString.prefix(4)).json")
         try? fm.moveItem(at: fileURL, to: corrupt)
+        Log.storage.error("Session illisible, mise de côté (\(corrupt.lastPathComponent, privacy: .public)) : reprise de la copie de secours")
         return decode(backupURL)
     }
 
@@ -229,6 +231,10 @@ enum StateStore {
 
     static func save(_ state: SavedState) {
         guard let data = try? JSONEncoder().encode(state) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        do {
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            Log.storage.error("Session non écrite : \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

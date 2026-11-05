@@ -29,6 +29,13 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
             return .cancel
         }
 
+        // WebKit has no view-source: of its own: the source opens in a tab of Nuri's.
+        if scheme == "view-source" {
+            // Only for a click: a script can't open tabs that way.
+            if navigationAction.navigationType == .linkActivated, let page = URLResolver.viewSourceTarget(url.absoluteString) { browser.showSource(of: page) }
+            return .cancel
+        }
+
         if !Self.internalSchemes.contains(scheme) {
             // mailto:, tel:, zoommtg:, … → hand over to macOS from the page itself: on a click, at
             // once for the usual system apps, after asking for the others; from a script, asked
@@ -88,6 +95,7 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
             download = true
         }
         let response = navigationResponse.response
+        StrictTransport.record(response, in: browser)
         guard download else {
             guard navigationResponse.isForMainFrame, PlainHTTP.needsWarning(response.url, in: browser) else { return .allow }
             tab?.insecurePage = response.url
@@ -153,6 +161,7 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let tab else { return }
         tab.didCommit(webView.url)
+        tab.takePageIdentity(of: webView)
         tab.applySiteZoom()
         tab.reader = nil
         tab.hasUserInput = false
@@ -166,6 +175,13 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         if tab.keepsHistory, let url = webView.url, let space = tab.space {
             HistoryStore.shared.record(url: url, title: webView.title ?? "", space: space.id)
             tab.lastRecordedURL = url
+        }
+        if tab.showsSourceWhenLoaded, let url = webView.url {
+            tab.showsSourceWhenLoaded = false
+            Task {
+                if let source = await BrowserModel.source(in: webView) { tab.showSource(source, of: url) }
+            }
+            return
         }
         FaviconLoader.load(for: tab)
         tab.restorePendingScroll()
@@ -186,6 +202,11 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return }
         if ns.domain == "WebKitErrorDomain" && (ns.code == 102 || ns.code == 204) { return }
         if tab?.recoverTypedAddress(from: ns) == true { return }
+        Log.web.error("Page en échec : \(ns.domain, privacy: .public) \(ns.code, privacy: .public)")
+        // The address that failed, for « Réessayer »: the tab's own is still the page before it.
+        let failing = ns.userInfo[NSURLErrorFailingURLErrorKey] as? URL
+            ?? (ns.userInfo[NSURLErrorFailingURLStringErrorKey] as? String).flatMap(URL.init(string:))
+        tab?.failedURL = failing
         tab?.loadError = ns.localizedDescription
         // Through a VPN extension, its password may have expired: asked again, and the page with it.
         if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorUserAuthenticationRequired, ExtensionProxy.shared.isRouting,
@@ -251,6 +272,7 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard let tab else { return }
+        Log.web.error("Le processus d'une page s'est arrêté")
         // Not shown: no reload now (after memory pressure, every tab reloading at once would
         // make it worse). It comes back when selected.
         guard tab.browser?.visibleTabs.contains(where: { $0 === tab }) == true else { tab.sleepKeepingHistory(); return }
@@ -262,6 +284,17 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
         lastCrashReload = Date()
         webView.reload()
+    }
+
+    // MARK: - Link under the pointer
+
+    /// The pointer over a link, or off it (WKUIDelegatePrivate): its address shows at the bottom of
+    /// the page, as in every browser. `element` is a _WKHitTestResult.
+    @objc(_webView:mouseDidMoveOverElement:withFlags:userInfo:)
+    func webView(_ webView: WKWebView, mouseDidMoveOverElement element: AnyObject?, withFlags flags: UInt, userInfo: AnyObject?) {
+        let selector = NSSelectorFromString("absoluteLinkURL")
+        let link = (element as? NSObject).flatMap { $0.responds(to: selector) ? $0.value(forKey: "absoluteLinkURL") as? URL : nil }
+        if tab?.hoveredLink != link { tab?.hoveredLink = link }
     }
 
     // MARK: - New windows → new tabs
@@ -421,13 +454,15 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// and refuses every request by itself.
     func webView(_ webView: WKWebView, decideMediaCapturePermissionsFor origin: WKSecurityOrigin,
                  initiatedBy frame: WKFrameInfo, type: WKMediaCaptureType) async -> WKPermissionDecision {
-        guard let tab, tab.browser?.selectedTab === tab, let window = webView.window ?? browser.window else { return .deny }
+        // Both sides of a split are on screen: either may ask.
+        guard let tab, isShown(tab), let window = webView.window ?? browser.window else { return .deny }
         let host = origin.host.nuriNormalizedHost
+        // A call may share its screen next, with its sound: the frame gets what adds it (ShareAudio).
+        await ShareAudio.shared.prepare(tab, frame: frame)
         return await MediaPermission.decide(host: host, type: type, in: browser) {
             let alert = NSAlert()
             alert.messageText = L("Autoriser « \(host) » à utiliser \(MediaPermission.devices(type)) ?", "Allow “\(host)” to use \(MediaPermission.devices(type))?")
-            alert.informativeText = self.browser.isPrivate ? L("Jusqu'à ce que vous quittiez Nuri ou fermiez cette fenêtre privée.", "Until you quit Nuri or close this private window.")
-                                                           : L("Jusqu'à ce que vous quittiez Nuri.", "Until you quit Nuri.")
+            alert.informativeText = MediaPermission.scope(in: self.browser)
             alert.addButton(withTitle: L("Autoriser", "Allow"))
             alert.addButton(withTitle: L("Refuser", "Deny"))
             return await withCheckedContinuation { continuation in
@@ -444,15 +479,17 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     @objc(_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:)
     func webViewRequestDisplayCapture(_ webView: WKWebView, for origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo,
                                       withSystemAudio: Bool, decisionHandler: @escaping (Int) -> Void) {
-        guard let tab, tab.browser?.selectedTab === tab, let window = webView.window ?? browser.window else { return decisionHandler(0) }
+        guard let tab, isShown(tab), let window = webView.window ?? browser.window else { return decisionHandler(0) }
         let alert = NSAlert()
         alert.messageText = L("Partager votre écran ?", "Share your screen?")
         alert.informativeText = L("« \(origin.host.nuriNormalizedHost) » le demande. Montrez une seule fenêtre, ou tout un écran : macOS vous laissera ensuite choisir laquelle.", "“\(origin.host.nuriNormalizedHost)” is asking. Show a single window, or a whole screen: macOS will then let you pick which one.")
-        // WebKit never captures the sound: Nuri adds it (ShareAudio).
+        // WebKit never captures the sound: Nuri adds it (ShareAudio), to a frame that asked for the
+        // camera or the microphone first (a call), the only ones given the script that does it.
         let sound = NSButton(checkboxWithTitle: L("Partager aussi le son (vidéos, autres apps)", "Share sound too (videos, other apps)"), target: nil, action: nil)
-        sound.state = AppSettings.shared.shareScreenAudio ? .on : .off
+        let canAddSound = ShareAudio.shared.isPrepared(tab, frame: frame)
+        sound.state = AppSettings.shared.shareScreenAudio && canAddSound ? .on : .off
         sound.toolTip = L("Le son de vos apps et des autres onglets de Nuri, sans celui de l'appel.", "The sound of your apps and Nuri's other tabs, without the call's.")
-        alert.accessoryView = sound
+        if canAddSound { alert.accessoryView = sound }
         alert.addButton(withTitle: L("Partager une fenêtre…", "Share a Window…"))
         alert.addButton(withTitle: L("Partager l'écran entier…", "Share Entire Screen…"))
         alert.addButton(withTitle: L("Refuser", "Deny")).keyEquivalent = "\u{1b}"
@@ -462,7 +499,7 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
             case .alertSecondButtonReturn: 1
             default: 0
             }
-            if decision != 0 {
+            if decision != 0, canAddSound {
                 AppSettings.shared.shareScreenAudio = sound.state == .on
                 if sound.state == .on, let tab { ShareAudio.shared.allow(tab) }
             }
@@ -477,15 +514,14 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     @objc(_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:)
     func webViewRequestGeolocation(_ webView: WKWebView, for origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo,
                                    decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-        guard let tab, tab.browser?.selectedTab === tab, let window = webView.window ?? browser.window else { return decisionHandler(.deny) }
+        guard let tab, isShown(tab), let window = webView.window ?? browser.window else { return decisionHandler(.deny) }
         let host = origin.host.nuriNormalizedHost
-        let isPrivate = browser.isPrivate
+        let browser = browser
         Task {
             let decision = await MediaPermission.decideLocation(host: host, in: browser) {
                 let alert = NSAlert()
                 alert.messageText = L("Autoriser « \(host) » à connaître votre position ?", "Allow “\(host)” to know your location?")
-                alert.informativeText = isPrivate ? L("Jusqu'à ce que vous quittiez Nuri ou fermiez cette fenêtre privée.", "Until you quit Nuri or close this private window.")
-                                                  : L("Jusqu'à ce que vous quittiez Nuri.", "Until you quit Nuri.")
+                alert.informativeText = MediaPermission.scope(in: browser)
                 alert.addButton(withTitle: L("Autoriser", "Allow"))
                 alert.addButton(withTitle: L("Refuser", "Deny"))
                 return await withCheckedContinuation { continuation in
@@ -494,6 +530,11 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
             }
             decisionHandler(decision)
         }
+    }
+
+    /// On screen: the selected tab, or the other side of its split.
+    private func isShown(_ tab: Tab) -> Bool {
+        tab.browser?.visibleTabs.contains { $0 === tab } == true
     }
 
     // MARK: - File upload

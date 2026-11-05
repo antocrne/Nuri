@@ -95,6 +95,32 @@ enum SuggestionEngine {
         return Array(out.filter { ids.insert($0.id).inserted }.prefix(11))
     }
 
+    /// What the field completes as it is typed: the site of a bookmark or of a visited page whose
+    /// name starts with it ("git" → "github.com"), or a longer address of one when it already has a
+    /// path ("github.com/ap" → "github.com/apple"). Bookmarks first, then the pages visited most.
+    /// Nothing in a private window, nor for a search (spaces), nor an address with its scheme.
+    static func completion(for typed: String, browser: BrowserModel) -> String? {
+        guard !browser.isPrivate, !typed.isEmpty, !typed.contains(" "), !typed.contains("://") else { return nil }
+        let lower = typed.lowercased()
+        let space = browser.currentSpaceID
+        let candidates = BookmarkStore.shared.search(typed, space: space, limit: 20).map(\.url)
+            + HistoryStore.shared.search(typed, space: space, limit: 30).map(\.url)
+        for url in candidates {
+            guard let host = url.host()?.nuriNormalizedHost else { continue }
+            let full = host + (url.port.map { ":\($0)" } ?? "")
+            if full.hasPrefix(lower), full.count > lower.count { return typed + full.dropFirst(typed.count) }
+            guard lower.contains("/") else { continue }
+            // Up to the end of the next part of the path.
+            var address = full + url.path
+            if address.hasSuffix("/") { address.removeLast() }
+            guard address.lowercased().hasPrefix(lower), address.count > lower.count else { continue }
+            let rest = address.dropFirst(lower.count)
+            let next = rest.dropFirst().firstIndex(of: "/").map { rest[..<$0] } ?? rest[...]
+            return typed + next
+        }
+        return nil
+    }
+
     /// Nuri's own commands, found by a few letters of what they're called, in either language.
     private static func commands(for lower: String, browser: BrowserModel) -> [Suggestion] {
         guard lower.count >= 3 else { return [] }
@@ -139,7 +165,7 @@ extension Suggestion {
 /// view's installation, and its state goes on saying it is focused: what counts is where AppKit's
 /// keyboard is, so it is asked again until the field really has it.
 @MainActor
-private func giveFocus(_ focused: FocusState<Bool>.Binding, in browser: BrowserModel) async {
+func giveFocus(_ focused: FocusState<Bool>.Binding, in browser: BrowserModel) async {
     for delay in [0, 30, 80, 150, 300] {
         try? await Task.sleep(for: .milliseconds(delay))
         guard !Task.isCancelled else { return }
@@ -148,6 +174,35 @@ private func giveFocus(_ focused: FocusState<Bool>.Binding, in browser: BrowserM
         focused.wrappedValue = true
         await Task.yield()
         if let editor = browser.window?.firstResponder as? NSTextView, editor.isFieldEditor { return }
+    }
+}
+
+/// Completes the address as it is typed, the added part selected: typing on replaces it, ⌫ takes it
+/// away, ↩ opens it. Only when letters are added at the end: never while erasing or editing inside.
+@MainActor
+final class InlineCompleter {
+    /// What the user typed, without the completion.
+    var typed = ""
+    /// The text this completer put in the field, while it's there.
+    private var shown: String?
+
+    /// The text the field should show instead of `value`, or nil to leave it.
+    func complete(_ value: String, browser: BrowserModel) -> String? {
+        if value == shown { return nil }   // The completion itself, coming back through the binding.
+        shown = nil
+        let grew = value.count > typed.count && value.hasPrefix(typed)
+        typed = value
+        guard grew, let editor = browser.window?.firstResponder as? NSTextView, editor.isFieldEditor,
+              editor.selectedRange().location == (value as NSString).length,
+              let completed = SuggestionEngine.completion(for: value, browser: browser) else { return nil }
+        shown = completed
+        // Once SwiftUI has put it in the field: the added part selected.
+        let start = (value as NSString).length, length = (completed as NSString).length - start
+        DispatchQueue.main.async {
+            guard editor.string == completed else { return }
+            editor.setSelectedRange(NSRange(location: start, length: length))
+        }
+        return completed
     }
 }
 
@@ -176,6 +231,7 @@ struct CommandBarOverlay: View {
     @State private var rows: [Suggestion] = []
     @State private var opened = false
     @State private var cardHeight: CGFloat = Self.fieldHeight
+    @State private var completer = InlineCompleter()
     @FocusState private var focused: Bool
 
     private static let fieldHeight: CGFloat = 46
@@ -198,6 +254,7 @@ struct CommandBarOverlay: View {
         }
         .onAppear {
             text = request.text
+            completer.typed = request.text
             rows = SuggestionEngine.suggestions(for: request.text, browser: browser)
             withAnimation(Theme.spring) { opened = true }
         }
@@ -238,6 +295,10 @@ struct CommandBarOverlay: View {
                     .foregroundStyle(Theme.text)
                     .focused($focused)
                     .onChange(of: text) { _, value in
+                        if let completed = completer.complete(value, browser: browser) {
+                            text = completed
+                            return
+                        }
                         rows = SuggestionEngine.suggestions(for: value, browser: browser)
                         selection = 0
                     }
@@ -292,6 +353,7 @@ struct NewTabField: View {
     @State private var text = ""
     @State private var selection = 0
     @State private var rows: [Suggestion] = []
+    @State private var completer = InlineCompleter()
     @FocusState private var focused: Bool
 
     private var tint: Color { browser.isPrivate ? Theme.privateText : Theme.secondaryText }
@@ -305,6 +367,10 @@ struct NewTabField: View {
                 .foregroundStyle(browser.isPrivate ? Theme.privateText : Theme.text)
                 .focused($focused)
                 .onChange(of: text) { _, value in
+                    if let completed = completer.complete(value, browser: browser) {
+                        text = completed
+                        return
+                    }
                     rows = value.isEmpty ? [] : SuggestionEngine.suggestions(for: value, browser: browser)
                     selection = 0
                 }

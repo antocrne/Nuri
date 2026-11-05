@@ -35,10 +35,11 @@ enum WebViewFactory {
         ucc.addUserScript(WKUserScript(source: Scripts.core, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: world))
         ucc.addUserScript(WKUserScript(source: Scripts.media, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: world))
         ucc.addUserScript(WKUserScript(source: Scripts.activity, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: world))
-        // Sound in screen sharing: the page's getDisplayMedia is wrapped in its own world.
+        // Sound in screen sharing.
         ucc.addScriptMessageHandler(ShareAudio.shared, contentWorld: world, name: ShareAudio.messageName)
         ucc.addUserScript(WKUserScript(source: Scripts.shareAudio, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: world))
-        ucc.addUserScript(WKUserScript(source: Scripts.shareAudioPage, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: .page))
+        // Its page-side half (shareaudio-page.js) only goes to frames that ask for the camera or the
+        // microphone: see ShareAudio.prepare.
         return ucc
     }
 
@@ -95,6 +96,16 @@ enum WebViewFactory {
 }
 
 extension WKWebView {
+    /// Loads an address. A file of the Mac also gets to read its folder (a page's images and styles
+    /// beside it): `load` alone gives a file page no access at all.
+    func nuriLoad(_ url: URL) {
+        if url.isFileURL {
+            loadFileURL(url, allowingReadAccessTo: url.hasDirectoryPath ? url : url.deletingLastPathComponent())
+        } else {
+            load(URLRequest(url: url))
+        }
+    }
+
     /// Calls an async JS function body in Nuri's world. Never throws and never hangs:
     /// returns nil on error or after `timeout` (a page promise may never settle).
     func nuriCall(_ body: String, arguments: [String: Any] = [:], in frame: WKFrameInfo? = nil,
