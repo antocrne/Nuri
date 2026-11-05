@@ -166,9 +166,13 @@ enum ExtensionFiles {
     private static let inlineShimStart = "/*nuri-shim:start*/"
     private static let inlineShimEnd = "/*nuri-shim:end*/\n"
 
+    /// chrome.runtime for the sites the extension lets talk to it (extension-external.js).
+    private static let externalFile = "nuri-external.js"
+    private static let externalIDPlaceholder = "__NURI_EXTENSION_ID__"
+
     private static let shimStamp: String = {
         var hash: UInt64 = 1469598103934665603   // FNV-1a
-        for byte in Scripts.extensionShim.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
+        for byte in (Scripts.extensionShim + Scripts.extensionExternal).utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
         return String(hash, radix: 36)
     }()
 
@@ -222,6 +226,21 @@ enum ExtensionFiles {
                 changed = true
             }
             manifest["content_scripts"] = entries
+        }
+
+        // The sites it lets talk to it get chrome.runtime, in their own world, before their scripts.
+        let connectable = ((manifest["externally_connectable"] as? [String: Any])?["matches"] as? [String])?
+            .filter { $0.hasPrefix("https://") } ?? []
+        var entries = manifest["content_scripts"] as? [[String: Any]] ?? []
+        let hasExternal = entries.contains { ($0["js"] as? [String])?.contains(externalFile) == true }
+        if !connectable.isEmpty, isExtensionID(folder.lastPathComponent),
+           (try? Data(Scripts.extensionExternal.replacingOccurrences(of: externalIDPlaceholder, with: folder.lastPathComponent).utf8)
+                .write(to: folder.appendingPathComponent(externalFile), options: .atomic)) != nil {
+            if !hasExternal {
+                entries.append(["matches": connectable, "js": [externalFile], "run_at": "document_start", "world": "MAIN", "all_frames": true])
+                manifest["content_scripts"] = entries
+                changed = true
+            }
         }
 
         if changed, let patched = try? JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .withoutEscapingSlashes]) {

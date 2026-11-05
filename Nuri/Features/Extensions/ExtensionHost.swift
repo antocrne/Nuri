@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SwiftUI
 import WebKit
 
 /// Runs the installed extensions, on WebKit's own support for them (the same format as Chrome's,
@@ -116,9 +117,10 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         for site in record.laterSites ?? [] {
             if let pattern = try? WKWebExtension.MatchPattern(string: site) { context.setPermissionStatus(.grantedExplicitly, for: pattern) }
         }
-        // A VPN's way to Nuri for chrome.proxy (ExtensionProxy): runtime.sendNativeMessage, which
-        // only ever reaches Nuri itself.
-        if Self.wantsProxy(webExtension) { context.setPermissionStatus(.grantedExplicitly, for: .nativeMessaging) }
+        // Its way to Nuri for what WebKit lacks (chrome.proxy, side panels, tab groups,
+        // chrome.debugger…; ExtensionNative): runtime.sendNativeMessage, which only ever reaches
+        // Nuri itself.
+        context.setPermissionStatus(.grantedExplicitly, for: .nativeMessaging)
         try makeController().load(context)
         contexts[id] = context
         if let saved = record.proxy, record.proxyAllowed == true { ExtensionProxy.shared.restore(saved, for: id) }
@@ -270,8 +272,11 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         try? FileManager.default.removeItem(at: ExtensionFiles.folder(of: id))
     }
 
-    private func unload(_ id: String) {
+    /// `reloading`: it comes back at once (revive): what Nuri keeps for it stays.
+    private func unload(_ id: String, reloading: Bool = false) {
         ExtensionProxy.shared.release(id, telling: false)
+        closeSidePanels(of: id)
+        if !reloading { ExtensionNative.forget(id) }
         guard let context = contexts[id] else { return }
         try? controller?.unload(context)
         contexts[id] = nil
@@ -362,11 +367,13 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         guard let context = contexts[id] else { return }
         let tab = browser.selectedTab.map(adapter(for:))
         Task {
+            ExtensionNative.note(context, "action clicked")
             if await backgroundWorkerIsLost(context) {
                 await revive(context)
-                _ = await backgroundAnswers(context)
+                if let revived = contexts[id] { _ = await backgroundAnswers(revived) }
             }
-            context.performAction(for: tab)
+            // A context reloaded by Nuri is a new one.
+            (contexts[id] ?? context).performAction(for: tab)
         }
     }
 
@@ -414,7 +421,9 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
 
     /// Asked from a blank page of the extension's own (ExtensionFiles.addShims): extension-shim.js
     /// answers in the worker, and a background WebKit had unloaded is woken up by the question.
-    /// True when there is no way to ask.
+    /// True when there is no way to ask. A page that doesn't even run is no answer: the extension's
+    /// pages go through its service worker, and with the worker lost they never load (Claude's
+    /// panel then spins forever).
     func backgroundAnswers(_ context: WKWebExtensionContext) async -> Bool {
         guard let page = await blankPage(of: context) else { return true }
         let answer = await page.nuriCall("""
@@ -422,22 +431,39 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
               browser.runtime.sendMessage({ nuriPing: true }).then((reply) => !!(reply && reply.nuriPong), () => false),
               new Promise((done) => setTimeout(() => done(false), 3000))]);
             """, world: .page, timeout: 4) as? Bool
-        return answer ?? true
+        ExtensionNative.note(context, "background check: \(answer.map { $0 ? "answers" : "no answer" } ?? "page didn't run")")
+        return answer ?? false
     }
 
-    /// `runtime.reload()`, as the extension would do itself.
+    /// `runtime.reload()`, as the extension would do itself, from one of its pages. When its pages
+    /// no longer run (they wait for the lost worker), Nuri loads the extension again itself: a new
+    /// context, with what it stored kept (only storage.session goes). At most three times a launch.
     private func revive(_ context: WKWebExtensionContext) async {
         guard reviving.insert(ObjectIdentifier(context)).inserted else { return }
         defer { reviving.remove(ObjectIdentifier(context)) }
         #if DEBUG
         revivals += 1
         #endif
+        let id = context.uniqueIdentifier
         guard let page = await blankPage(of: context) else { return }
-        // No waiting for its answer: reloading takes this page away, and it may never come.
-        page.evaluateJavaScript("browser.runtime.reload(); true", completionHandler: nil)
+        if await page.nuriCall("return true;", world: .page, timeout: 2) as? Bool == true {
+            ExtensionNative.note(context, "background lost: runtime.reload()")
+            // No waiting for its answer: reloading takes this page away, and it may never come.
+            page.evaluateJavaScript("browser.runtime.reload(); true", completionHandler: nil)
+            try? await Task.sleep(for: .seconds(1))
+            _ = page
+            return
+        }
+        guard (nativeReloads[id] ?? 0) < 3, let record = installed.first(where: { $0.id == id && $0.enabled }), contexts[id] === context else { return }
+        nativeReloads[id, default: 0] += 1
+        ExtensionNative.note(context, "background lost and its pages don't run: loaded again by Nuri")
+        unload(id, reloading: true)
+        await load(record)
+        // Its pages open in tabs get the new context at their next load.
         try? await Task.sleep(for: .seconds(1))
-        _ = page
     }
+
+    @ObservationIgnored private var nativeReloads: [String: Int] = [:]
 
     private func blankPage(of context: WKWebExtensionContext) async -> WKWebView? {
         guard let configuration = context.webViewConfiguration else { return nil }
@@ -611,6 +637,12 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
     func webExtensionController(_ controller: WKWebExtensionController, openNewTabUsing configuration: WKWebExtension.TabConfiguration,
                                 for extensionContext: WKWebExtensionContext, completionHandler: @escaping ((any WKWebExtensionTab)?, (any Error)?) -> Void) {
         let browser = (configuration.window as? ExtensionWindow)?.browser ?? BrowserWindows.shared.normalTarget
+        // chrome.sidePanel.open(): the extension's panel, not a tab.
+        if let url = configuration.url, let panelURL = Self.sidePanelURL(url, of: extensionContext) {
+            showSidePanel(panelURL, of: extensionContext, in: browser.isPrivate ? BrowserWindows.shared.normalTarget : browser)
+            return completionHandler(nil, nil)
+        }
+        ExtensionNative.note(extensionContext, "tab opened: \(configuration.url?.absoluteString.prefix(160) ?? "nil")")
         let tab = browser.openTab(url: configuration.url, background: !configuration.shouldBeActive,
                                   after: (configuration.parentTab as? ExtensionTab)?.tab)
         if configuration.shouldBeMuted { tab.setMuted(true) }
@@ -620,6 +652,7 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
     func webExtensionController(_ controller: WKWebExtensionController, openNewWindowUsing configuration: WKWebExtension.WindowConfiguration,
                                 for extensionContext: WKWebExtensionContext, completionHandler: @escaping ((any WKWebExtensionWindow)?, (any Error)?) -> Void) {
         // Extensions are kept out of private windows, even at their own request.
+        ExtensionNative.note(extensionContext, "window opened: \(configuration.tabURLs.map { $0.absoluteString.prefix(160) })")
         let browser = BrowserWindows.shared.openNormalWindow()
         for url in configuration.tabURLs { browser.openTab(url: url) }
         completionHandler(adapter(for: browser), nil)
@@ -673,15 +706,77 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
-    /// runtime.sendNativeMessage: only Nuri's own chrome.proxy answers (extension-shim.js), for an
-    /// extension that asked for it. No app of the Mac is ever reached.
+    /// runtime.sendNativeMessage: only Nuri itself answers, for what extension-shim.js asks of it
+    /// (ExtensionNative). No app of the Mac is ever reached.
     func webExtensionController(_ controller: WKWebExtensionController, sendMessage message: Any, toApplicationWithIdentifier applicationIdentifier: String?,
                                 for extensionContext: WKWebExtensionContext, replyHandler: @escaping (Any?, (any Error)?) -> Void) {
-        guard applicationIdentifier == ExtensionProxy.appID, Self.wantsProxy(extensionContext.webExtension) else {
+        guard let identifier = applicationIdentifier, identifier.hasPrefix(ExtensionNative.prefix) else {
             replyHandler(nil, NSError(domain: "Nuri", code: 1, userInfo: [NSLocalizedDescriptionKey: L("Nuri ne relie pas les extensions aux apps du Mac.", "Nuri doesn't connect extensions to Mac apps.")]))
             return
         }
-        Task { replyHandler(await ExtensionProxy.shared.handle(message, from: extensionContext), nil) }
+        let app = String(identifier.dropFirst(ExtensionNative.prefix.count))
+        let started = Date()
+        let summary = ExtensionLog.isOn && app != "log" ? Self.summary(of: message) : ""
+        if !summary.isEmpty { ExtensionNative.note(extensionContext, "→ \(app) \(summary)") }
+        Task {
+            let reply = await ExtensionNative.handle(app, message, from: extensionContext)
+            if !summary.isEmpty {
+                ExtensionNative.note(extensionContext, "← \(app) \(String(format: "%.2f", Date().timeIntervalSince(started))) s")
+            }
+            replyHandler(reply, nil)
+        }
+    }
+
+    /// The keys of a message to Nuri, for the log.
+    private static func summary(of message: Any) -> String {
+        guard let body = message as? [String: Any] else { return "" }
+        return body.keys.sorted().map { key in
+            if key == "command", let command = body[key] as? String { return command }
+            if key == "url", let address = body[key] as? String { return String(address.prefix(80)) }
+            return key
+        }.joined(separator: ",")
+    }
+
+    // MARK: - Side panel (chrome.sidePanel, extension-shim.js)
+
+    /// The mark extension-shim.js puts on a side panel's page, asked for as a new tab.
+    nonisolated static let sidePanelMark = "nuri-side-panel"
+
+    /// The page of a chrome.sidePanel.open(), without Nuri's mark: one of the extension's own pages.
+    static func sidePanelURL(_ url: URL, of context: WKWebExtensionContext) -> URL? {
+        guard url.scheme?.lowercased() == Extensions.pageScheme, url.host()?.lowercased() == context.baseURL.host()?.lowercased(),
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.queryItems?.contains(where: { $0.name == sidePanelMark }) == true else { return nil }
+        components.queryItems = components.queryItems?.filter { $0.name != sidePanelMark }
+        if components.queryItems?.isEmpty == true { components.queryItems = nil }
+        return components.url
+    }
+
+    /// Beside the window's page. The same extension's panel already open gets the new page; another
+    /// extension's gives it its place.
+    func showSidePanel(_ url: URL, of context: WKWebExtensionContext, in browser: BrowserModel) {
+        guard !browser.isPrivate, let configuration = context.webViewConfiguration else { return }
+        if let panel = browser.sidePanel, panel.extensionID == context.uniqueIdentifier {
+            ExtensionNative.note(context, "side panel asked again: \(url.absoluteString)")
+            if panel.webView.url != url { panel.webView.load(URLRequest(url: url)) }
+            return
+        }
+        ExtensionNative.note(context, "side panel shown: \(url.absoluteString)")
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.isInspectable = true
+        webView.underPageBackgroundColor = .clear
+        webView.load(URLRequest(url: url))
+        let name = context.webExtension.displayName ?? L("Extension", "Extension")
+        let icon = context.webExtension.icon(for: CGSize(width: 32, height: 32))
+        let panel = ExtensionSidePanel(extensionID: context.uniqueIdentifier, name: name, icon: icon, webView: webView, browser: browser)
+        withAnimation(Theme.spring) { browser.sidePanel = panel }
+    }
+
+    /// The panels of an extension going away.
+    func closeSidePanels(of id: String) {
+        for browser in BrowserWindows.shared.all where browser.sidePanel?.extensionID == id {
+            browser.sidePanel = nil
+        }
     }
 
     func webExtensionController(_ controller: WKWebExtensionController, didUpdate action: WKWebExtension.Action, forExtensionContext context: WKWebExtensionContext) {

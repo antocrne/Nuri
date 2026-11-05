@@ -102,6 +102,8 @@ final class BrowserModel {
     var editingBookmark = false
     /// The bar is out while `autoHideTopBar` hides it (the pointer reached the top edge).
     var topBarRevealed = false
+    /// An extension's side panel, beside the page (chrome.sidePanel).
+    var sidePanel: ExtensionSidePanel?
     /// The split page whose small handle is out (the pointer rests near its top). While the
     /// handle is dragged: the page it would swap with, nil until it has crossed over.
     var splitHandleSide: SplitSide?
@@ -616,6 +618,7 @@ final class BrowserModel {
         }
         porthole?.sleep(force: true)
         porthole = nil
+        sidePanel = nil
         if isPrivate {
             for space in spaces {
                 space.dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}

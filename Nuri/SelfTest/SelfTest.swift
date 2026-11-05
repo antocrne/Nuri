@@ -68,6 +68,8 @@ final class FeatureSelfTest {
             ("extensions", { await $0.testExtensions() }),
             ("lancement", { await $0.testExtensionsAtLaunch() }),
             ("vpn", { await $0.testVPN() }),
+            ("claude", { await $0.testClaude() }),
+            ("origine", { await $0.testExtensionOrigin() }),
             ("lecture", { await $0.testReader() }),
             ("historique", { await $0.testHistory() }),
             ("signets", { await $0.testBookmarks() }),
@@ -1401,6 +1403,272 @@ final class FeatureSelfTest {
         }
     }
 
+    /// Claude's side panel, and what its agent asks of Nuri: its contexts, tab groups,
+    /// chrome.debugger on a page (screenshot, click, typing, script) and chrome.identity.
+    /// `-NuriSelfTestClaude <folder>`: a copy of the extension to add (else the store's).
+    private func testClaude() async {
+        guard #available(macOS 15.4, *) else { return }
+        let host = ExtensionHost.shared
+        let id = "fcoeoabgfenejglbffodgkkbkcdhcgfn"
+        if let folder = UserDefaults.standard.string(forKey: "NuriSelfTestClaude") {
+            do { _ = try await host.add(from: URL(fileURLWithPath: folder), id: id, source: .webStore, asks: false) } catch { note("Claude : \(error)") }
+        } else {
+            await host.addFromStore(id: id, in: nil, asks: false)
+        }
+        check("Claude : ajoutée et lancée", host.running.contains { $0.record.id == id }, host.problems[id] ?? "")
+        guard host.running.contains(where: { $0.record.id == id }) else { return }
+        let page = await htmlTab("""
+            <!doctype html><title>Essai Claude</title>
+            <body style="margin:0;height:3000px;background:#fff">
+            <button id=b style="position:absolute;left:40px;top:40px;width:200px;height:60px" onclick="this.dataset.clicked=(+(this.dataset.clicked||0)+1)">Bouton</button>
+            <input id=i style="position:absolute;left:40px;top:140px;width:300px;height:30px" onkeydown="if(event.key==='Enter')this.dataset.enter='oui'">
+            """, title: "Essai Claude")
+        // Past the moment WebKit may lose its worker.
+        await sleep(8)
+        host.performAction(id, in: browser)
+        let opened = await until(15) { browser.sidePanel != nil }
+        check("Claude : son bouton ouvre son panneau à côté de la page", opened, "\(host.revivals) relance(s)")
+        guard let panel = browser.sidePanel else { return }
+        _ = await until(10) { panel.webView.url != nil && !panel.webView.isLoading }
+        check("Claude : le panneau a sa page, sans la marque de Nuri", panel.webView.url?.query()?.contains("tabId=") == true
+              && panel.webView.url?.absoluteString.contains(ExtensionHost.sidePanelMark) == false, panel.webView.url?.absoluteString ?? "nil")
+        await sleep(6)
+        let refused = await panel.webView.nuriCall("return !!document.querySelector('[data-testid=unrecognized-window]')", world: .page, timeout: 3) as? Bool
+        let text = await panel.webView.nuriCall("return document.body.innerText", world: .page, timeout: 3) as? String
+        check("Claude : le panneau se reconnaît comme panneau", refused == false, text?.prefix(200).replacingOccurrences(of: "\n", with: " / ") ?? "nil")
+        note("Claude : panneau — \(text?.prefix(400).replacingOccurrences(of: "\n", with: " / ") ?? "nil")")
+        savePopupPicture(panel.webView, "claude-panneau")
+        await snapshot("claude-fenetre")
+
+        // What its code asks, from the panel's own page.
+        let ask = { (body: String) async -> [String: Any]? in
+            await panel.webView.nuriCall("try {\n" + body + "\n} catch (error) { return { error: String(error && error.message) + ' | ' + String(error && error.stack) }; }", world: .page, timeout: 20) as? [String: Any]
+        }
+        let find = "const [tab] = (await chrome.tabs.query({})).filter((t) => t.title === 'Essai Claude' || (t.url || '').includes('nuri-selftest'));"
+        let contexts = await ask("""
+            const found = await chrome.runtime.getContexts({ documentUrls: [location.href] });
+            return { types: found.map((c) => c.contextType), tabs: found.map((c) => c.tabId) };
+            """)
+        check("Claude : getContexts le dit panneau latéral", (contexts?["types"] as? [String]) == ["SIDE_PANEL"], "\(String(describing: contexts))")
+
+        let grouped = await ask(find + """
+            const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+            const group = await chrome.tabGroups.update(groupId, { title: "Essai Nuri", color: chrome.tabGroups.Color.ORANGE });
+            const again = await chrome.tabs.get(tab.id);
+            const listed = await chrome.tabGroups.query({ title: "Essai Nuri" });
+            const inside = await chrome.tabs.query({ groupId });
+            await chrome.tabs.ungroup([tab.id]);
+            const after = await chrome.tabs.get(tab.id);
+            const gone = await chrome.tabGroups.get(groupId).then(() => false, () => true);
+            return { groupId, color: group.color, member: again.groupId, listed: listed.length, inside: inside.length, after: after.groupId, gone };
+            """)
+        check("Claude : groupes d'onglets", (grouped?["member"] as? Int) == (grouped?["groupId"] as? Int) && grouped?["color"] as? String == "orange"
+              && grouped?["listed"] as? Int == 1 && grouped?["inside"] as? Int == 1 && grouped?["after"] as? Int == -1 && grouped?["gone"] as? Bool == true,
+              "\(String(describing: grouped))")
+
+        let refusal = await ask("""
+            const message = await chrome.debugger.sendCommand({ tabId: 987654 }, "Runtime.evaluate", { expression: "1" }).then(() => null, (error) => error.message);
+            const called = await new Promise((done) => chrome.debugger.sendCommand({ tabId: 987654 }, "Runtime.evaluate", { expression: "1" }, (result) => done(result === undefined)));
+            return { message, called };
+            """)
+        check("Claude : une commande du debugger sur un onglet inconnu échoue", (refusal?["message"] as? String)?.isEmpty == false && refusal?["called"] as? Bool == true,
+              "\(String(describing: refusal))")
+
+        let evaluated = await ask(find + """
+            const target = { tabId: tab.id };
+            await chrome.debugger.attach(target, "1.3");
+            const run = (expression) => chrome.debugger.sendCommand(target, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, replMode: true });
+            const simple = await run("{1 + 2\\n}");
+            const title = await run("{document.title\\n}");
+            const statements = await run("{const a = 2; a * 4\\n}");
+            const awaited = await run("{await new Promise((done) => setTimeout(() => done(5), 10))\\n}");
+            const returned = await run("{const b = [1, 2]; return b.length\\n}");
+            const thrown = await run("{throw new TypeError('raté')\\n}");
+            const tree = await chrome.debugger.sendCommand(target, "Page.getFrameTree");
+            const targets = await chrome.debugger.getTargets();
+            return { simple: simple.result.value, title: title.result.value, statements: statements.result.value, awaited: awaited.result.value,
+                     returned: returned.result.value, thrown: thrown.exceptionDetails && thrown.exceptionDetails.exception.className,
+                     url: tree.frameTree.frame.url, attached: targets.some((t) => t.tabId === tab.id && t.attached) };
+            """)
+        check("Claude : Runtime.evaluate (expression, instructions, await, return, erreur)",
+              evaluated?["simple"] as? Int == 3 && evaluated?["title"] as? String == "Essai Claude" && evaluated?["statements"] as? Int == 8
+              && evaluated?["awaited"] as? Int == 5 && evaluated?["returned"] as? Int == 2 && evaluated?["thrown"] as? String == "TypeError",
+              "\(String(describing: evaluated))")
+        check("Claude : Page.getFrameTree et getTargets", (evaluated?["url"] as? String)?.contains("nuri-selftest") == true && evaluated?["attached"] as? Bool == true,
+              "\(String(describing: evaluated))")
+
+        browser.select(page)
+        await sleep(0.5)
+        browser.select(page)
+        await sleep(0.5)
+        let shot = await ask(find + """
+            const viewport = (await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => [innerWidth, innerHeight, devicePixelRatio] }))[0].result;
+            const { data } = await chrome.debugger.sendCommand({ tabId: tab.id }, "Page.captureScreenshot", { format: "jpeg", quality: 80, captureBeyondViewport: false, fromSurface: true });
+            const image = await new Promise((done) => { const i = new Image(); i.onload = () => done(i); i.onerror = () => done(null); i.src = "data:image/jpeg;base64," + data; });
+            return { length: data.length, width: image && image.width, height: image && image.height, viewport };
+            """)
+        let viewport = shot?["viewport"] as? [Double] ?? []
+        check("Claude : capture de la page, en pixels de l'écran", (shot?["length"] as? Int ?? 0) > 1000 && viewport.count == 3
+              && abs(Double(shot?["width"] as? Int ?? 0) - viewport[0] * viewport[2]) <= 2, "\(String(describing: shot))")
+
+        let acted = await ask(find + """
+            const target = { tabId: tab.id };
+            const send = (method, params) => chrome.debugger.sendCommand(target, method, params);
+            const click = async (x, y) => {
+              await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" });
+              await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
+              await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
+            };
+            await click(140, 70);
+            await click(190, 155);
+            await send("Input.insertText", { text: "bonjour" });
+            const key = (key, code, windowsVirtualKeyCode, text = "") => Promise.all([
+              send("Input.dispatchKeyEvent", { type: text ? "keyDown" : "rawKeyDown", key, code, windowsVirtualKeyCode, text, unmodifiedText: text, modifiers: 0 }),
+              send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode, modifiers: 0 })]);
+            await key("Backspace", "Backspace", 8);
+            await key("!", "Digit1", 49, "!");
+            await key("Enter", "Enter", 13, "\\r");
+            await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: 200, y: 300, deltaX: 0, deltaY: 400 });
+            const state = (await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+              const button = document.getElementById("b"), input = document.getElementById("i");
+              return { clicked: button.dataset.clicked || "0", value: input.value, enter: input.dataset.enter || "non", focused: document.activeElement === input, scrolled: scrollY };
+            } }))[0].result;
+            return state;
+            """)
+        check("Claude : un clic du debugger arrive sur la page", acted?["clicked"] as? String == "1", "\(String(describing: acted))")
+        check("Claude : la frappe arrive dans le champ (texte, effacement, touche, Entrée)", acted?["value"] as? String == "bonjou!" && acted?["enter"] as? String == "oui",
+              "\(String(describing: acted))")
+        check("Claude : la molette fait défiler la page", (acted?["scrolled"] as? Double ?? 0) >= 300, "\(String(describing: acted))")
+
+        // Sign-in: a page coming back to the extension's address, in sight or not.
+        if let server = LocalServer() {
+            _ = await until(2) { server.port != 0 }
+            let flow = await ask("""
+                const redirect = chrome.identity.getRedirectURL();
+                const back = redirect + "cb?code=abc";
+                const landed = await chrome.identity.launchWebAuthFlow({ url: "http://127.0.0.1:\(server.port)/redirect?to=" + encodeURIComponent(back), interactive: false });
+                const refused = await chrome.identity.launchWebAuthFlow({ url: "http://127.0.0.1:\(server.port)/long", interactive: false, timeoutMsForNonInteractive: 1500 }).then(() => "non", (e) => e.message);
+                return { redirect, landed, refused };
+                """)
+            check("Claude : chrome.identity.getRedirectURL", flow?["redirect"] as? String == "https://\(id).chromiumapp.org/", "\(String(describing: flow))")
+            check("Claude : launchWebAuthFlow rend l'adresse d'arrivée", (flow?["landed"] as? String)?.hasSuffix("/cb?code=abc") == true, "\(String(describing: flow))")
+            check("Claude : launchWebAuthFlow sans réponse échoue au bout du délai", (flow?["refused"] as? String)?.contains("interaction") == true, "\(String(describing: flow))")
+
+            // A header WebKit's rules refuse is kept by Nuri for the extension's own requests (its
+            // pages' CSP lets them reach Anthropic only: the header itself isn't seen here).
+            let headers = await ask("""
+                await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [77], addRules: [{ id: 77, priority: 1,
+                  action: { type: "modifyHeaders", requestHeaders: [{ header: "User-Agent", operation: "set", value: "essai" }, { header: "anthropic-client-platform", operation: "set", value: "nuri-essai" }] },
+                  condition: { urlFilter: "https://api.anthropic.com/*", resourceTypes: ["xmlhttprequest", "other"] } }] });
+                const session = await chrome.declarativeNetRequest.getSessionRules();
+                const kept = await chrome.runtime.sendNativeMessage("app.nuri.headers", { get: true });
+                const rule = (kept.rules || []).find((r) => (r.headers || []).some((h) => h.value === "nuri-essai")) || {};
+                return { webkit: session.map((r) => (r.action.requestHeaders || []).map((h) => h.header).join(",")), regex: rule.regex,
+                         matches: new RegExp(rule.regex).test("https://api.anthropic.com/v1/messages"), header: (rule.headers || []).filter((h) => h.value === "nuri-essai").map((h) => h.header).join(",") };
+                """)
+            check("Claude : un en-tête refusé par WebKit est gardé pour ses requêtes, le reste de la règle passe",
+                  headers?["matches"] as? Bool == true && headers?["header"] as? String == "anthropic-client-platform"
+                  && (headers?["webkit"] as? [String])?.contains("User-Agent") == true, "\(String(describing: headers))")
+        }
+
+        // claude.ai reaches the extension through chrome.runtime, and is told when one isn't there.
+        let site = browser.openTab(url: URL(string: "https://claude.ai/login"))
+        await waitForLoad(site)
+        let external = await site.webView?.nuriCall("""
+            if (!window.chrome || !chrome.runtime) return { runtime: false };
+            const absent = await chrome.runtime.sendMessage("abcdefghijklmnopabcdefghijklmnop", { type: "ping" }).then(() => "réponse", (e) => e.message);
+            const present = await chrome.runtime.sendMessage(id, { type: "ping" }).then((reply) => JSON.stringify(reply ?? null), (e) => "erreur " + e.message);
+            return { runtime: true, absent, present };
+            """, arguments: ["id": id], world: .page, timeout: 10) as? [String: Any]
+        check("Claude : claude.ai a chrome.runtime, avec l'erreur de Chrome pour une extension absente",
+              external?["runtime"] as? Bool == true && (external?["absent"] as? String)?.contains("Receiving end does not exist") == true, "\(String(describing: external))")
+        check("Claude : claude.ai est reconnu par l'extension (son origine passe, comme pour la connexion)",
+              (external?["present"] as? String)?.contains("\"exists\":true") == true, "\(String(describing: external?["present"]))")
+        browser.close(site)
+
+        // Closed by its own page, as Claude's ⌘E does.
+        _ = await panel.webView.nuriCall("window.close()", world: .page, timeout: 2)
+        check("Claude : window.close() dans le panneau le ferme", await until(3) { browser.sidePanel == nil })
+
+        // Again: its button, its sign-in, closed by Nuri's button, and once more.
+        browser.select(page)
+        host.performAction(id, in: browser)
+        check("Claude : rouvert par son bouton", await until(15) { browser.sidePanel != nil })
+        if let again = browser.sidePanel {
+            _ = await until(10) { !again.webView.isLoading }
+            await sleep(4)
+            let tabsBefore = browser.allTabs.count
+            let clicked = await again.webView.nuriCall("""
+                const button = [...document.querySelectorAll("button")].find((b) => /connecter|log in/i.test(b.innerText));
+                if (!button) return false;
+                button.click();
+                return true;
+                """, world: .page, timeout: 3) as? Bool
+            let signIn = await until(10) { browser.allTabs.count > tabsBefore }
+            let opened = browser.allTabs.last
+            check("Claude : « Se connecter » ouvre la page d'autorisation de claude.ai", clicked == true && signIn
+                  && (opened?.url?.absoluteString ?? opened?.requestedURL?.absoluteString ?? "").contains("claude.ai/oauth/authorize"),
+                  "\(String(describing: clicked)) · \(opened?.url?.absoluteString.prefix(120) ?? "nil")")
+            check("Claude : le panneau reste ouvert pendant la connexion", browser.sidePanel === again)
+            if signIn, let opened { browser.close(opened) }
+            again.close()
+            check("Claude : fermé par Nuri", await until(3) { browser.sidePanel == nil })
+            browser.select(page)
+            host.performAction(id, in: browser)
+            check("Claude : rouvert après avoir été fermé par Nuri", await until(15) { browser.sidePanel != nil }, "\(host.revivals) relance(s)")
+            browser.sidePanel?.close()
+        }
+        browser.close(page)
+        host.remove(id)
+    }
+
+    /// What an extension's own requests carry as Origin, and whether a declarativeNetRequest rule
+    /// changes it (Anthropic's API refuses webkit-extension:// origins for Claude).
+    private func testExtensionOrigin() async {
+        guard #available(macOS 15.4, *), let server = LocalServer() else { return }
+        _ = await until(2) { server.port != 0 }
+        let host = ExtensionHost.shared
+        let id = "ponmlkjihgfedcbaponmlkjihgfedcba"
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("nuri-origin-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let manifest = """
+            {"manifest_version":3,"name":"Essai origine","version":"1.0",
+             "permissions":["declarativeNetRequest","declarativeNetRequestWithHostAccess"],"host_permissions":["<all_urls>"],
+             "background":{"service_worker":"worker.js"}}
+            """
+        try? manifest.write(to: folder.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
+        try? "self.addEventListener('message', () => {});".write(to: folder.appendingPathComponent("worker.js"), atomically: true, encoding: .utf8)
+        try? "<!doctype html><title>origine</title>".write(to: folder.appendingPathComponent("page.html"), atomically: true, encoding: .utf8)
+        do { _ = try await host.add(from: folder, id: id, source: .webStore, asks: false) } catch { note("Origine : \(error)") }
+        let tab = browser.openTab(url: URL(string: "webkit-extension://\(id)/page.html"))
+        await waitForLoad(tab)
+        let base = "http://127.0.0.1:\(server.port)"
+        let origin = { (request: String) in request.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("origin:") } ?? "aucune" }
+        _ = await tab.webView?.nuriCall("await fetch(base + '/echo', { method: 'POST', body: 'x' }).catch(() => null); return true;",
+                                        arguments: ["base": base], world: .page, timeout: 5)
+        note("Origine : sans règle — \(origin(server.lastRequest))")
+        let set = await tab.webView?.nuriCall("""
+            try {
+              await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [5], addRules: [{ id: 5, priority: 1,
+                action: { type: "modifyHeaders", requestHeaders: [{ header: "Origin", operation: "set", value: "chrome-extension://nuri-essai" }] },
+                condition: { urlFilter: base + "/", resourceTypes: ["xmlhttprequest", "other"] } }] });
+            } catch (error) { return "règle refusée : " + error.message; }
+            await fetch(base + '/echo', { method: 'POST', body: 'x' }).catch(() => null);
+            return "règle posée";
+            """, arguments: ["base": base], world: .page, timeout: 8) as? String
+        note("Origine : \(set ?? "nil") — \(origin(server.lastRequest))")
+        _ = await tab.webView?.nuriCall("await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [5] }); await fetch(base + '/echo', { method: 'POST', body: 'x' }).catch(() => null); return true;",
+                                        arguments: ["base": base], world: .page, timeout: 5)
+        check("Origine : ses requêtes partent avec l'origine de Chrome", origin(server.lastRequest) == "Origin: chrome-extension://\(id)", origin(server.lastRequest))
+        let web = await htmlTab("<title>web</title>w", base: base + "/")
+        _ = await web.webView?.nuriCall("await fetch(base + '/echo', { method: 'POST', body: 'x' }).catch(() => null); return true;",
+                                        arguments: ["base": base], world: .page, timeout: 5)
+        check("Origine : une page web garde la sienne", origin(server.lastRequest) == "Origin: \(base)", origin(server.lastRequest))
+        browser.close(web)
+        browser.close(tab)
+        host.remove(id)
+    }
+
     private func savePopupPicture(_ popup: WKWebView?, _ id: String) {
         let path = (outputPath as NSString).deletingPathExtension + "-popup-\(id.prefix(6)).png"
         popup?.takeSnapshot(with: nil) { image, _ in
@@ -1765,6 +2033,8 @@ final class FeatureSelfTest {
         var port: UInt16 { listener.port?.rawValue ?? 0 }
         /// The Referer of the last /echo.
         private(set) var lastReferer: String?
+        /// The last request, whole.
+        private(set) var lastRequest = ""
         init?() {
             guard let listener = try? NWListener(using: .tcp, on: .any) else { return nil }
             self.listener = listener
@@ -1772,8 +2042,16 @@ final class FeatureSelfTest {
                 connection.start(queue: .global())
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, _, _ in
                     let request = String(decoding: data ?? Data(), as: UTF8.self)
+                    self?.lastRequest = request
                     if request.hasPrefix("GET /echo") {
                         self?.lastReferer = request.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("referer:") }?.dropFirst(8).trimmingCharacters(in: .whitespaces)
+                    }
+                    // /redirect?to=…: a 302 there (a sign-in page coming back to an extension).
+                    if request.hasPrefix("GET /redirect?to="), let line = request.components(separatedBy: " ").dropFirst().first,
+                       let target = URLComponents(string: line)?.queryItems?.first(where: { $0.name == "to" })?.value {
+                        let head = "HTTP/1.1 302 Found\r\nLocation: \(target)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        connection.send(content: Data(head.utf8), completion: .contentProcessed { _ in connection.cancel() })
+                        return
                     }
                     if request.hasPrefix("GET /long") || request.hasPrefix("GET /echo") {
                         let html = Data("<!doctype html><title>Long</title><body style='height:5000px'>long".utf8)

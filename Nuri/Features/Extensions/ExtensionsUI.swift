@@ -292,6 +292,18 @@ private struct ExtensionsSettings: View {
                        "All pages then go through the server it picks, private windows included, without giving it access to them. Its own exchanges with its service stay direct."))
             }
         }
+        if host.installed.contains(where: { host.webExtension($0.id)?.manifest["permissions"].map { ($0 as? [String])?.contains("sidePanel") == true } == true }) {
+            @Bindable var settings = AppSettings.shared
+            SettingsGroup(title: L("Panneau latéral", "Side Panel")) {
+                Picker(L("Côté de la page", "Side of the page"), selection: $settings.sidePanelOnLeft) {
+                    Text(L("À droite", "Right")).tag(false)
+                    Text(L("À gauche", "Left")).tag(true)
+                }
+                .pickerStyle(.segmented)
+                Note(L("Celui qu'une extension ouvre à côté de la page, comme la conversation de Claude. Son bord intérieur se tire pour l'élargir.",
+                       "The one an extension opens beside the page, like Claude's conversation. Drag its inner edge to widen it."))
+            }
+        }
         SettingsGroup(title: L("Depuis le Chrome Web Store", "From the Chrome Web Store")) {
             HStack {
                 TextField(L("Adresse de l'extension sur le store", "The extension's address on the store"), text: $address)

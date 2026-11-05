@@ -84,6 +84,10 @@ final class AppSettings {
     var extensionsAutoUpdate: Bool { didSet { defaults.set(extensionsAutoUpdate, forKey: "extensionsAutoUpdate") } }
     /// Pinned extensions drawn in the bar's one color, like its symbols (off: their own colors).
     var monochromeExtensions: Bool { didSet { defaults.set(monochromeExtensions, forKey: "monochromeExtensions") } }
+    /// An extension's side panel (Claude's conversation): its card's width, and on the left of the
+    /// page rather than the right.
+    var sidePanelWidth: Double { didSet { defaults.set(sidePanelWidth, forKey: "sidePanelWidth") } }
+    var sidePanelOnLeft: Bool { didSet { defaults.set(sidePanelOnLeft, forKey: "sidePanelOnLeft") } }
     var autoMeetingPiP: Bool { didSet { defaults.set(autoMeetingPiP, forKey: "autoMeetingPiP") } }
     var blockAutoplayWithSound: Bool { didSet { defaults.set(blockAutoplayWithSound, forKey: "blockAutoplayWithSound") } }
     /// « Partager aussi le son » in the screen sharing question, as last answered.
@@ -122,6 +126,8 @@ final class AppSettings {
         autoPiP = d.object(forKey: "autoPiP") as? Bool ?? true
         extensionsAutoUpdate = d.object(forKey: "extensionsAutoUpdate") as? Bool ?? true
         monochromeExtensions = d.bool(forKey: "monochromeExtensions")
+        sidePanelWidth = d.object(forKey: "sidePanelWidth") as? Double ?? ExtensionSidePanel.defaultWidth
+        sidePanelOnLeft = d.bool(forKey: "sidePanelOnLeft")
         autoMeetingPiP = d.object(forKey: "autoMeetingPiP") as? Bool ?? true
         blockAutoplayWithSound = d.bool(forKey: "blockAutoplayWithSound")
         shareScreenAudio = d.bool(forKey: "shareScreenAudio")

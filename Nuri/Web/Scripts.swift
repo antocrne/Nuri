@@ -9,6 +9,7 @@ enum Scripts {
     static let shareAudio = load("shareaudio")
     static let shareAudioPage = load("shareaudio-page")
     static let extensionShim = load("extension-shim")
+    static let extensionExternal = load("extension-external")
     static let notificationPage = load("notification-page")
 
     private static func load(_ name: String) -> String {

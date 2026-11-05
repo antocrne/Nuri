@@ -23,10 +23,15 @@ private struct BrowserWindowContent: View {
             VStack(spacing: 0) {
                 if showsFixedBar { TopBar() }
                 if Updater.shared.showsBar { UpdateBar() }
-                PageArea()
-                    .padding(.horizontal, Metrics.pageInset)
-                    .padding(.bottom, Metrics.pageInset)
-                    .padding(.top, showsFixedBar ? 0 : Metrics.pageInset)
+                HStack(spacing: Metrics.pageInset) {
+                    if settings.sidePanelOnLeft { sidePanel }
+                    PageArea()
+                    if !settings.sidePanelOnLeft { sidePanel }
+                }
+                .animation(Theme.spring, value: browser.sidePanel?.id)
+                .padding(.horizontal, Metrics.pageInset)
+                .padding(.bottom, Metrics.pageInset)
+                .padding(.top, showsFixedBar ? 0 : Metrics.pageInset)
             }
             if !showsFixedBar, browser.topBarRevealed || browser.carry != nil {
                 // Its look is behind it, not around it: clipping or shadowing the bar itself would
@@ -52,6 +57,15 @@ private struct BrowserWindowContent: View {
             setTrafficLights(visible: shown)
         }
         .onAppear { setTrafficLights(visible: showsFixedBar || browser.topBarRevealed) }
+    }
+
+    @ViewBuilder
+    private var sidePanel: some View {
+        if let panel = browser.sidePanel, !browser.isPrivate {
+            ExtensionSidePanelCard(panel: panel)
+                .id(panel.id)
+                .transition(.move(edge: settings.sidePanelOnLeft ? .leading : .trailing).combined(with: .opacity))
+        }
     }
 
     /// In full screen, the bar stays: the pointer there brings up the system's menu bar instead.

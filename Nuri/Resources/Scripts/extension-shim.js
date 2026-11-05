@@ -84,6 +84,41 @@
   const inBackground = (typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope)
     || (() => { try { return native.extension.getBackgroundPage() === globalThis; } catch { return false; } })();
 
+  // A WebSocket opened in an extension's service worker ends the worker at once in WebKit (Claude's
+  // bridge to claude.ai, opened as soon as one is signed in): the extension's background is gone,
+  // and its pages, which go through the worker, never load again. There it fails the way a refused
+  // connection does, and the extension carries on without it. Its pages keep real WebSockets.
+  if (typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope && typeof EventTarget === "function") {
+    class RefusedWebSocket extends EventTarget {
+      constructor(address, protocols) {
+        super();
+        this.url = String(address);
+        this.protocol = "";
+        this.extensions = "";
+        this.binaryType = "blob";
+        this.bufferedAmount = 0;
+        this.readyState = RefusedWebSocket.CONNECTING;
+        this.onopen = this.onerror = this.onclose = this.onmessage = null;
+        setTimeout(() => {
+          this.readyState = RefusedWebSocket.CLOSED;
+          const error = new Event("error");
+          this.dispatchEvent(error);
+          if (typeof this.onerror === "function") this.onerror(error);
+          const close = Object.assign(new Event("close"), { code: 1006, reason: "", wasClean: false });
+          this.dispatchEvent(close);
+          if (typeof this.onclose === "function") this.onclose(close);
+        }, 0);
+      }
+      send() { throw new DOMException("WebSocket is not open", "InvalidStateError"); }
+      close() { this.readyState = RefusedWebSocket.CLOSED; }
+    }
+    Object.assign(RefusedWebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+    Object.assign(RefusedWebSocket.prototype, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+    try {
+      Object.defineProperty(globalThis, "WebSocket", { value: RefusedWebSocket, configurable: true, writable: true });
+    } catch {}
+  }
+
   // Nuri's questions to the background, sent from a blank page of the extension's own: whether it
   // is there (ExtensionHost.backgroundAnswers; what WebKit tells of a service worker isn't
   // reliable), and for chrome.proxy below. Registered before the extension's own listeners: the
@@ -145,11 +180,43 @@
       Object.defineProperty(target, name, { value: make(), configurable: true, writable: true, enumerable: true });
     } catch {}
   };
+  const replace = (target, name, value) => {
+    try {
+      Object.defineProperty(target, name, { value, configurable: true, writable: true, enumerable: true });
+    } catch {}
+  };
+  const manifest = runtime.getManifest() || {};
+
+  // Chrome's two styles: a promise, or a callback. On failure Chrome's callback runs with
+  // runtime.lastError set; WebKit's runtime ignores any change to that property (and never sets it
+  // itself), so the callback runs with no value.
+  const answer = (promise, callback) => {
+    if (typeof callback !== "function") return promise;
+    promise.then((value) => callback(value), () => callback());
+  };
+  const failure = (message) => Promise.reject(new Error(message));
+
+  // Nuri itself, through runtime.sendNativeMessage to one of its own names: Nuri answers them and
+  // never passes them to an app of the Mac (ExtensionHost, ExtensionNative). What has to be shared
+  // by all of an extension's contexts (its side panel, its tab groups) or reach Nuri's windows
+  // (chrome.debugger, chrome.identity) is answered there.
+  const toNuri = (app, message) => {
+    if (typeof runtime.sendNativeMessage !== "function") return failure(`Nuri n'est pas joignable (${app})`);
+    return runtime.sendNativeMessage(`app.nuri.${app}`, message).then((reply) => {
+      if (reply && reply.error) throw new Error(reply.error);
+      return reply || {};
+    });
+  };
 
   for (const name of ["onUpdateAvailable", "onRestartRequired", "onBrowserUpdateAvailable", "onSuspend",
                       "onSuspendCanceled", "onMessageExternal", "onConnectExternal"]) {
     define(runtime, name, event);
   }
+  // Chrome's named values, read without a second thought (Claude's onInstalled stops at the first).
+  define(runtime, "OnInstalledReason", () => ({ INSTALL: "install", UPDATE: "update", CHROME_UPDATE: "chrome_update", SHARED_MODULE_UPDATE: "shared_module_update" }));
+  define(runtime, "OnRestartRequiredReason", () => ({ APP_UPDATE: "app_update", OS_UPDATE: "os_update", PERIODIC: "periodic" }));
+  define(runtime, "PlatformOs", () => ({ MAC: "mac", WIN: "win", ANDROID: "android", CROS: "cros", LINUX: "linux", OPENBSD: "openbsd", FUCHSIA: "fuchsia" }));
+  define(runtime, "PlatformArch", () => ({ ARM: "arm", ARM64: "arm64", X86_32: "x86-32", X86_64: "x86-64", MIPS: "mips", MIPS64: "mips64" }));
   define(runtime, "requestUpdateCheck", () => () => Promise.resolve({ status: "no_update" }));
   // tabs.getCurrent(): in Chrome, the tab showing this very page, and nothing in a popup. WebKit
   // gives a popup the tab it was opened over; extensions then take their popup for a page in a
@@ -268,32 +335,131 @@
     search: (query, callback) => settle(Promise.resolve([]), callback),
     setUiOptions: (options, callback) => settle(Promise.resolve(), callback),
   }));
-  // Tab groups: Nuri has none. Their constants are read as soon as some extensions start (Claude
-  // lists the group colors at load); every tab is outside any group, grouping is refused.
-  if (native.tabs) {
-    define(native, "tabGroups", () => ({
-      TAB_GROUP_ID_NONE: -1,
+  // An event this file fires itself.
+  const firing = () => {
+    const listeners = new Set();
+    return {
+      api: {
+        addListener: (listener) => { listeners.add(listener); },
+        removeListener: (listener) => { listeners.delete(listener); },
+        hasListener: (listener) => listeners.has(listener),
+        hasListeners: () => listeners.size > 0,
+      },
+      fire: (...args) => { for (const listener of [...listeners]) { try { listener(...args); } catch {} } },
+    };
+  };
+
+  // Tab groups (Claude gathers the tabs it works in into one): WebKit has none. Nuri keeps them,
+  // for all of the extension's contexts at once, by the tab identifiers WebKit gives it; tabs.get
+  // and tabs.query tell each tab's group, as Chrome does. Nuri draws none of them.
+  if (tabs && native.tabGroups === undefined) {
+    const NONE = -1;
+    const groups = (message) => toNuri("tabgroups", message);
+    const created = firing(), updated = firing(), removed = firing();
+    const told = (reply) => {
+      for (const group of reply.created || []) created.fire(group);
+      for (const group of reply.updated || []) updated.fire(group);
+      for (const group of reply.removed || []) removed.fire(group);
+      return reply;
+    };
+    const withGroups = async (list) => {
+      const { members = {} } = await groups({ members: true }).catch(() => ({}));
+      return list.map((tab) => (tab && typeof tab === "object" ? { ...tab, groupId: members[tab.id] ?? NONE } : tab));
+    };
+    const get = tabs.get.bind(tabs);
+    const query = tabs.query.bind(tabs);
+    replace(tabs, "get", (tabId, callback) => answer(get(tabId).then(async (tab) => (await withGroups([tab]))[0]), callback));
+    replace(tabs, "query", (info, callback) => {
+      if (typeof info === "function") { callback = info; info = {}; }
+      const { groupId, ...rest } = info || {};
+      return answer(query(rest).then(withGroups).then((list) => (groupId === undefined ? list : list.filter((tab) => tab.groupId === groupId))), callback);
+    });
+    replace(tabs, "group", (options, callback) => answer((async () => {
+      const ids = [].concat((options && options.tabIds) ?? []);
+      if (!ids.length) throw new Error("No tabs specified.");
+      let windowId = options.createProperties && options.createProperties.windowId;
+      if (windowId == null) windowId = (await get(ids[0])).windowId;
+      return told(await groups({ group: ids, groupId: options.groupId ?? null, windowId: windowId ?? NONE })).groupId;
+    })(), callback));
+    replace(tabs, "ungroup", (tabIds, callback) => answer(groups({ ungroup: [].concat(tabIds ?? []) }).then((reply) => { told(reply); }), callback));
+    define(tabs, "TAB_ID_NONE", () => NONE);
+    // A closed tab leaves its group; an empty group goes.
+    if (inBackground && tabs.onRemoved) {
+      try { tabs.onRemoved.addListener((tabId) => { groups({ ungroup: [tabId] }).then(told, () => {}); }); } catch {}
+    }
+    replace(native, "tabGroups", {
+      TAB_GROUP_ID_NONE: NONE,
       Color: Object.fromEntries(["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"]
         .map((color) => [color.toUpperCase(), color])),
-      onCreated: event(), onUpdated: event(), onRemoved: event(), onMoved: event(),
-      query: (info, callback) => settle(Promise.resolve([]), callback),
-      get: unsupported("chrome.tabGroups"),
-      update: unsupported("chrome.tabGroups"),
-      move: unsupported("chrome.tabGroups"),
-    }));
-    define(native.tabs, "group", () => unsupported("chrome.tabs.group"));
-    define(native.tabs, "ungroup", () => unsupported("chrome.tabs.ungroup"));
-    define(native.tabs, "TAB_ID_NONE", () => -1);
+      onCreated: created.api, onUpdated: updated.api, onRemoved: removed.api, onMoved: event(),
+      get: (groupId, callback) => answer(groups({ get: groupId }).then((reply) => reply.group), callback),
+      query: (info, callback) => answer(groups({ query: info || {} }).then((reply) => reply.groups || []), callback),
+      update: (groupId, properties, callback) => answer(groups({ update: groupId, properties: properties || {} }).then((reply) => told(reply).group), callback),
+      move: (groupId, properties, callback) => answer(groups({ get: groupId }).then((reply) => reply.group), callback),
+    });
   }
-  // The debugger (Chrome DevTools Protocol): WebKit has none. Its events are listened to at
-  // start; attaching is refused, so what drives pages through it says it can't.
-  define(native, "debugger", () => ({
-    onEvent: event(), onDetach: event(),
-    attach: unsupported("chrome.debugger"),
-    detach: () => Promise.resolve(),
-    sendCommand: unsupported("chrome.debugger"),
-    getTargets: (callback) => settle(Promise.resolve([]), callback),
-  }));
+
+  // The debugger (Chrome DevTools Protocol): WebKit has none. Nuri answers what extensions that
+  // drive pages ask of it (screenshots, the pointer, the keyboard, running a script in the page;
+  // ExtensionDebugger), on the tab WebKit names. Commands go one after the other, in the order
+  // given: a word typed is a series of keys sent all at once.
+  if (native.debugger === undefined) {
+    const attached = new Set();
+    const target = async (debuggee) => {
+      const tabId = debuggee && debuggee.tabId;
+      if (tabId == null) throw new Error("Nuri ne débogue que des onglets");
+      const tab = await tabs.get(tabId);
+      let frame = null;
+      try {
+        const window = await native.windows.get(tab.windowId);
+        frame = { left: window.left, top: window.top, width: window.width, height: window.height };
+      } catch {}
+      return { tabId, index: tab.index, url: tab.url || "", frame };
+    };
+    let queue = Promise.resolve();
+    const inTurn = (work) => {
+      const run = queue.then(work);
+      queue = run.catch(() => {});
+      return run;
+    };
+    replace(native, "debugger", {
+      onEvent: event(), onDetach: event(),
+      attach: (debuggee, version, callback) => answer(inTurn(async () => {
+        await toNuri("debugger", { attach: await target(debuggee) });
+        attached.add(debuggee.tabId);
+      }), callback),
+      detach: (debuggee, callback) => answer(Promise.resolve().then(() => { attached.delete(debuggee && debuggee.tabId); }), callback),
+      sendCommand: (debuggee, method, params, callback) => {
+        if (typeof params === "function") { callback = params; params = undefined; }
+        return answer(inTurn(async () => (await toNuri("debugger", { command: method, params: params || {}, target: await target(debuggee) })).result ?? {}), callback);
+      },
+      getTargets: (callback) => answer(tabs.query({}).then((list) => list.map((tab) => ({
+        id: String(tab.id), tabId: tab.id, type: "page", title: tab.title || "", url: tab.url || "",
+        attached: attached.has(tab.id), faviconUrl: tab.favIconUrl,
+      }))), callback),
+    });
+  }
+
+  // chrome.identity: an extension signs in through a page that comes back to its own address at
+  // chromiumapp.org. Nuri opens that page with the cookies of the window's space (out of sight,
+  // or in a window when it may ask something) and gives back the address it lands on.
+  if (native.identity === undefined) {
+    const redirect = (path) => `https://${runtime.id}.chromiumapp.org/${String(path || "").replace(/^\//, "")}`;
+    replace(native, "identity", {
+      getRedirectURL: redirect,
+      launchWebAuthFlow: (details, callback) => answer(toNuri("identity", {
+        url: String((details && details.url) || ""), interactive: !!(details && details.interactive), redirect: redirect(),
+        timeout: (details && details.timeoutMsForNonInteractive) || 0,
+        abortOnLoad: !!(details && details.abortOnLoadForNonInteractive),
+      }).then((reply) => reply.url), callback),
+      getAuthToken: (details, callback) => answer(failure("chrome.identity.getAuthToken n'est pas pris en charge par Nuri"), typeof details === "function" ? details : callback),
+      removeCachedAuthToken: (details, callback) => answer(Promise.resolve(), callback),
+      clearAllCachedAuthTokens: (callback) => answer(Promise.resolve(), callback),
+      getProfileUserInfo: (details, callback) => answer(Promise.resolve({ email: "", id: "" }), typeof details === "function" ? details : callback),
+      getAccounts: (callback) => answer(Promise.resolve([]), callback),
+      onSignInChanged: event(),
+    });
+  }
   // System notifications: not shown (WebKit has no API for them), accepted silently.
   define(native, "notifications", () => ({
     onClicked: event(), onClosed: event(), onButtonClicked: event(), onShowSettings: event(),
@@ -306,27 +472,115 @@
   const constants = (values) => Object.fromEntries(values.map((value) => [value.replace(/([a-z])([A-Z])/g, "$1_$2").toUpperCase(), value]));
   const rules = native.declarativeNetRequest;
   if (rules) {
+    // Held, so that what is added below stays (WebKit may rebuild an object nobody holds).
+    replace(native, "declarativeNetRequest", rules);
     define(rules, "RuleActionType", () => constants(["block", "redirect", "allow", "upgradeScheme", "modifyHeaders", "allowAllRequests"]));
     define(rules, "HeaderOperation", () => constants(["append", "set", "remove"]));
     define(rules, "ResourceType", () => constants(["main_frame", "sub_frame", "stylesheet", "script", "image", "font", "object",
       "xmlhttprequest", "ping", "csp_report", "media", "websocket", "webtransport", "webbundle", "other"]));
     define(rules, "DomainType", () => constants(["firstParty", "thirdParty"]));
     define(rules, "RequestMethod", () => constants(["connect", "delete", "get", "head", "options", "patch", "post", "put", "other"]));
+
+    // WebKit's modifyHeaders only knows standard headers: a rule setting one of the site's own
+    // (Claude's anthropic-client-platform, for its API) makes the whole call fail, and Claude's
+    // start stops there. Such headers are taken out of the rule, which WebKit then accepts, and
+    // added here to the extension's own requests (Nuri keeps them for all of its contexts). Pages'
+    // requests don't get them.
+    const refused = /header `([^`]+)` is not recognized/i;
+    const pattern = (condition) => {
+      if (condition.regexFilter) return condition.regexFilter;
+      let filter = condition.urlFilter || "*";
+      let start = "", end = "";
+      if (filter.startsWith("||")) { start = "^[a-z][a-z0-9+.-]*://([^/]*\\.)?"; filter = filter.slice(2); }
+      else if (filter.startsWith("|")) { start = "^"; filter = filter.slice(1); }
+      if (filter.endsWith("|")) { end = "$"; filter = filter.slice(0, -1); }
+      const body = filter.split("").map((c) => (c === "*" ? ".*" : c === "^" ? "([^a-zA-Z0-9_.%-]|$)" : c.replace(/[.+?${}()|[\]\\/]/g, "\\$&"))).join("");
+      return start + body + end;
+    };
+    for (const name of ["updateSessionRules", "updateDynamicRules"]) {
+      if (typeof rules[name] !== "function") continue;
+      const original = rules[name].bind(rules);
+      replace(rules, name, (options, callback) => answer((async () => {
+        const given = options || {};
+        let added = (given.addRules || []).map((rule) => JSON.parse(JSON.stringify(rule)));
+        const moved = [];
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await original({ ...given, addRules: added });
+            break;
+          } catch (error) {
+            const found = refused.exec(String((error && error.message) || error));
+            if (!found || attempt > 30) throw error;
+            const header = found[1].toLowerCase();
+            let changed = false;
+            added = added.flatMap((rule) => {
+              const action = rule.action || {};
+              const own = (action.requestHeaders || []).filter((entry) => String(entry.header).toLowerCase() === header);
+              if (!own.length) return [rule];
+              changed = true;
+              moved.push({ id: rule.id, regex: pattern(rule.condition || {}), headers: own });
+              const kept = (action.requestHeaders || []).filter((entry) => !own.includes(entry));
+              if (!kept.length && !(action.responseHeaders || []).length) return [];
+              return [{ ...rule, action: { ...action, requestHeaders: kept } }];
+            });
+            if (!changed) throw error;
+          }
+        }
+        await toNuri("headers", { remove: given.removeRuleIds || [], add: moved }).catch(() => {});
+        loadHeaders();
+      })(), callback));
+    }
+  }
+
+  // Its own requests leave with the Origin Chrome gives them, chrome-extension://<id>, not WebKit's
+  // webkit-extension://: services that know an extension by its origin refuse the other
+  // (Anthropic's API answers Claude "CORS requests are not allowed for this Organization"). Only
+  // what the extension itself sends: pages' requests are left alone. Set once, by its background.
+  const permissionNames = manifest.permissions || [];
+  if (rules && inBackground && typeof rules.updateSessionRules === "function"
+      && (permissionNames.includes("declarativeNetRequest") || permissionNames.includes("declarativeNetRequestWithHostAccess"))) {
+    const originRule = 2147480001;
+    rules.updateSessionRules({ removeRuleIds: [originRule], addRules: [{ id: originRule, priority: 1,
+      action: { type: "modifyHeaders", requestHeaders: [{ header: "Origin", operation: "set", value: `chrome-extension://${runtime.id}` }] },
+      condition: { initiatorDomains: [runtime.id], resourceTypes: ["xmlhttprequest", "websocket", "other"] } }] }).catch(() => {});
+  }
+
+  // The headers kept above, on the extension's own fetch() calls.
+  let headerRules = Promise.resolve([]);
+  const loadHeaders = () => {
+    headerRules = toNuri("headers", { get: true }).then((reply) => (reply.rules || []).flatMap((rule) => {
+      try { return [{ pattern: new RegExp(rule.regex), headers: rule.headers }]; } catch { return []; }
+    }), () => []);
+  };
+  if (typeof globalThis.fetch === "function") {
+    loadHeaders();
+    const fetchFirst = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (input, init) => {
+      const list = await headerRules;
+      if (!list.length) return fetchFirst(input, init);
+      let address = "";
+      try { address = new URL(input instanceof Request ? input.url : String(input), globalThis.location && globalThis.location.href).href; } catch {}
+      const wanted = list.filter((rule) => rule.pattern.test(address));
+      if (!wanted.length) return fetchFirst(input, init);
+      const headers = new Headers((init && init.headers) || (input instanceof Request ? input.headers : undefined));
+      for (const rule of wanted) {
+        for (const entry of rule.headers) {
+          const operation = String(entry.operation || "set").toLowerCase();
+          if (operation === "remove") headers.delete(entry.header);
+          else if (operation === "append") headers.append(entry.header, entry.value ?? "");
+          else headers.set(entry.header, entry.value ?? "");
+        }
+      }
+      return fetchFirst(input, { ...(init || {}), headers });
+    };
   }
   // chrome.proxy (VPN extensions): WebKit has none. Nuri routes pages through the server the
   // extension sets (ExtensionProxy), reached by runtime.sendNativeMessage, which Nuri answers
   // itself for an extension asking for "proxy" and never passes to an app of the Mac. The
   // server's password comes from the extension's webRequest.onAuthRequired: WebKit never calls
   // it, so the listeners are kept here and called when Nuri asks, in the background.
-  const manifest = runtime.getManifest() || {};
   if ((manifest.permissions || []).includes("proxy") && native.proxy === undefined) {
-    const toNuri = (message) => {
-      if (typeof runtime.sendNativeMessage !== "function") return Promise.reject(new Error("chrome.proxy n'est pas pris en charge par Nuri"));
-      return runtime.sendNativeMessage("app.nuri.proxy", message).then((reply) => {
-        if (reply && reply.error) throw new Error(reply.error);
-        return reply || {};
-      });
-    };
+    const toProxy = (message) => toNuri("proxy", message);
     const changeListeners = new Set();
     const changed = {
       addListener: (listener) => { changeListeners.add(listener); },
@@ -336,9 +590,9 @@
     };
     define(native, "proxy", () => ({
       settings: {
-        get: (details, callback) => settle(toNuri({ get: true }), typeof details === "function" ? details : callback),
-        set: (details, callback) => settle(toNuri({ set: (details && details.value) || {} }).then(() => undefined), callback),
-        clear: (details, callback) => settle(toNuri({ clear: true }).then(() => undefined), typeof details === "function" ? details : callback),
+        get: (details, callback) => settle(toProxy({ get: true }), typeof details === "function" ? details : callback),
+        set: (details, callback) => settle(toProxy({ set: (details && details.value) || {} }).then(() => undefined), callback),
+        clear: (details, callback) => settle(toProxy({ clear: true }).then(() => undefined), typeof details === "function" ? details : callback),
         onChange: changed,
       },
       onProxyError: event(),
@@ -410,60 +664,68 @@
       next();
     });
   }
-  // runtime.getContexts (which pages of the extension are open): none known.
-  define(runtime, "ContextType", () => ({ TAB: "TAB", POPUP: "POPUP", BACKGROUND: "BACKGROUND", OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT", SIDE_PANEL: "SIDE_PANEL" }));
-  define(runtime, "getContexts", () => (filter, callback) => settle(Promise.resolve([]), callback));
   // Offscreen documents (clipboard, audio…): refused, the way Chrome refuses a bad request, so
   // that extensions fall back on something else instead of stopping.
   define(native, "offscreen", () => ({
-    Reason: {},
+    Reason: Object.fromEntries(["TESTING", "AUDIO_PLAYBACK", "IFRAME_SCRIPTING", "DOM_SCRAPING", "BLOBS", "DOM_PARSER", "USER_MEDIA",
+      "DISPLAY_MEDIA", "WEB_RTC", "CLIPBOARD", "LOCAL_STORAGE", "WORKERS", "BATTERY_STATUS", "MATCH_MEDIA", "GEOLOCATION"].map((name) => [name, name])),
     createDocument: unsupported("chrome.offscreen"),
     hasDocument: () => Promise.resolve(false),
     closeDocument: () => Promise.resolve(),
   }));
-  // Side panel (Claude, Perplexity…): Nuri has no panel beside the page, its page opens in a tab.
-  // The settings live in the context that sets them, usually the background, which also opens it.
+
+  // Side panel (Claude, Perplexity…): Nuri shows the page in a card beside the page
+  // (ExtensionSidePanel). It is asked for as a new tab with Nuri's mark in its address, which Nuri
+  // takes away: the panel's page sees its own address. Its settings live in the context that sets
+  // them, usually the background, which also opens it.
+  const panelMark = "nuri-side-panel";
   const panel = {
-    path: ((runtime.getManifest() || {}).side_panel || {}).default_path || "",
+    path: (manifest.side_panel || {}).default_path || "",
     paths: new Map(),
     disabled: new Set(),
     onAction: false,
   };
-  const openPanel = (options) => {
+  const panelPath = (tabId) => (tabId != null && panel.paths.get(tabId)) || panel.path;
+  const openPanel = async (options) => {
     const tabId = options && options.tabId;
-    const path = (tabId != null && panel.paths.get(tabId)) || panel.path;
-    if (!path || (tabId != null && panel.disabled.has(tabId))) {
-      return Promise.reject(new Error("Aucun panneau latéral pour cet onglet"));
-    }
-    const create = { url: runtime.getURL(path.replace(/^\//, "")), active: true };
-    if (tabId != null) create.openerTabId = tabId;
+    const path = panelPath(tabId);
+    if (!path || (tabId != null && panel.disabled.has(tabId))) throw new Error("No active side panel for this tab.");
+    const url = new URL(runtime.getURL(path.replace(/^\//, "")));
+    url.searchParams.set(panelMark, "1");
+    const create = { url: url.href, active: true };
     if (options && options.windowId != null) create.windowId = options.windowId;
-    return native.tabs.create(create).then(() => undefined, () => undefined);
+    else if (tabId != null) {
+      try { create.windowId = (await tabs.get(tabId)).windowId; } catch {}
+    }
+    await native.tabs.create(create).catch(() => {});
   };
   const ownPanel = native.sidePanel === undefined;
-  define(native, "sidePanel", () => ({
-    setPanelBehavior: (behavior, callback) => {
-      if (behavior && "openPanelOnActionClick" in behavior) panel.onAction = !!behavior.openPanelOnActionClick;
-      return settle(Promise.resolve(), callback);
-    },
-    getPanelBehavior: (callback) => settle(Promise.resolve({ openPanelOnActionClick: panel.onAction }), callback),
-    setOptions: (options, callback) => {
-      const { tabId, path, enabled } = options || {};
-      if (tabId != null) {
-        if (path) panel.paths.set(tabId, path);
-        if (enabled === false) panel.disabled.add(tabId); else if (enabled === true) panel.disabled.delete(tabId);
-      } else if (path) {
-        panel.path = path;
-      }
-      return settle(Promise.resolve(), callback);
-    },
-    getOptions: (options, callback) => {
-      const tabId = options && options.tabId;
-      const path = (tabId != null && panel.paths.get(tabId)) || panel.path;
-      return settle(Promise.resolve({ path, enabled: !!path && !(tabId != null && panel.disabled.has(tabId)) }), callback);
-    },
-    open: (options, callback) => settle(openPanel(options), callback),
-  }));
+  if (ownPanel) {
+    replace(native, "sidePanel", {
+      setPanelBehavior: (behavior, callback) => {
+        if (behavior && "openPanelOnActionClick" in behavior) panel.onAction = !!behavior.openPanelOnActionClick;
+        return answer(Promise.resolve(), callback);
+      },
+      getPanelBehavior: (callback) => answer(Promise.resolve({ openPanelOnActionClick: panel.onAction }), callback),
+      setOptions: (options, callback) => {
+        const { tabId, path, enabled } = options || {};
+        if (tabId != null) {
+          if (path) panel.paths.set(tabId, path);
+          if (enabled === false) panel.disabled.add(tabId); else if (enabled === true) panel.disabled.delete(tabId);
+        } else if (path) {
+          panel.path = path;
+        }
+        return answer(Promise.resolve(), callback);
+      },
+      getOptions: (options, callback) => {
+        const tabId = options && options.tabId;
+        const path = panelPath(tabId);
+        return answer(Promise.resolve({ path, enabled: !!path && !(tabId != null && panel.disabled.has(tabId)) }), callback);
+      },
+      open: (options, callback) => answer(openPanel(options), callback),
+      close: (options, callback) => answer(toNuri("panel", { close: true }).then(() => undefined), callback),
+    });
+  }
   // setPanelBehavior({ openPanelOnActionClick: true }): the button opens the panel. Heard in the
   // background only (a service worker, or an older extension's background page).
   const action = native.action || native.browserAction;
@@ -474,4 +736,163 @@
       });
     } catch {}
   }
+
+  // runtime.getContexts: which of the extension's pages are open. The side panels are Nuri's (a
+  // panel's page asks it to know it is one: Claude's shows nothing otherwise); WebKit, when it
+  // knows the API, tells the rest.
+  define(runtime, "ContextType", () => ({ TAB: "TAB", POPUP: "POPUP", BACKGROUND: "BACKGROUND", OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT", SIDE_PANEL: "SIDE_PANEL" }));
+  {
+    const webKitContexts = typeof runtime.getContexts === "function" ? runtime.getContexts.bind(runtime) : null;
+    const wanted = (filter, context) => {
+      const among = (list, value) => !Array.isArray(list) || list.includes(value);
+      return among(filter.contextTypes, context.contextType) && among(filter.documentUrls, context.documentUrl)
+        && among(filter.documentOrigins, context.documentOrigin) && among(filter.tabIds, context.tabId)
+        && among(filter.windowIds, context.windowId) && among(filter.contextIds, context.contextId)
+        && among(filter.frameIds, context.frameId) && (filter.incognito === undefined || filter.incognito === context.incognito);
+    };
+    replace(runtime, "getContexts", (filter, callback) => {
+      if (typeof filter === "function") { callback = filter; filter = {}; }
+      return answer((async () => {
+        const criteria = filter || {};
+        const panels = ownPanel ? ((await toNuri("panel", { contexts: true }).catch(() => ({}))).contexts || []) : [];
+        const shown = new Set(panels.map((context) => context.documentUrl));
+        const theirs = webKitContexts ? await webKitContexts(criteria).catch(() => []) : [];
+        return [...theirs.filter((context) => !shown.has(context.documentUrl)), ...panels.filter((context) => wanted(criteria, context))];
+      })(), callback);
+    });
+  }
+
+  // Claude's panel frames claude.ai/cic, a page that only lets Chrome's extension pages show it:
+  // here it stays blank, and the panel waits for it forever. The panel is told what that page says
+  // when it can't serve there, and goes on with the conversation it carries itself.
+  if (!inBackground && typeof document !== "undefined" && typeof MutationObserver === "function") {
+    const blocked = /^https:\/\/(preview\.)?claude\.ai\/cic(\/|\?|$)/;
+    const seen = new WeakSet();
+    const tell = (frame) => {
+      const source = frame.getAttribute("src") || "";
+      if (seen.has(frame) || !blocked.test(source)) return;
+      seen.add(frame);
+      const origin = new URL(source).origin;
+      for (const delay of [0, 60, 300, 1000, 3000]) {
+        setTimeout(() => {
+          try { window.dispatchEvent(new MessageEvent("message", { origin, data: { type: "cic_sidepanel_cowork_unavailable" } })); } catch {}
+        }, delay);
+      }
+    };
+    const look = (root) => {
+      if (root.tagName === "IFRAME") tell(root);
+      if (root.querySelectorAll) root.querySelectorAll("iframe").forEach(tell);
+    };
+    new MutationObserver((changes) => {
+      for (const change of changes) {
+        if (change.type === "attributes") look(change.target);
+        else change.addedNodes.forEach((node) => { if (node.nodeType === 1) look(node); });
+      }
+    }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ["src"] });
+  }
+
+  // What goes wrong in an extension's pages, written in Nuri's log when it is asked for (the
+  // `extensionConsoleLog` default): an extension's own inspector isn't always at hand.
+  toNuri("log", { enabled: true }).then((reply) => {
+    if (!reply.enabled) return;
+    let sent = 0;
+    const where = (globalThis.location && globalThis.location.pathname) || "background";
+    const send = (kind, parts) => {
+      if (sent++ > 600) return;
+      const text = parts.map((part) => {
+        if (part instanceof Error) return `${part.name}: ${part.message}\n${part.stack || ""}`;
+        if (typeof part === "object") { try { return JSON.stringify(part); } catch { return String(part); } }
+        return String(part);
+      }).join(" ").slice(0, 2000);
+      toNuri("log", { log: `${kind} ${where}: ${text}` }).catch(() => {});
+    };
+    for (const kind of ["error", "warn"]) {
+      const original = console[kind].bind(console);
+      console[kind] = (...parts) => { send(kind, parts); original(...parts); };
+    }
+    for (const kind of ["log", "info"]) {
+      const original = console[kind].bind(console);
+      console[kind] = (...parts) => { send(kind, parts); original(...parts); };
+    }
+    globalThis.addEventListener("error", (event) => send("exception", [event.error || event.message, event.filename || "", event.lineno || ""]));
+    globalThis.addEventListener("unhandledrejection", (event) => send("rejection", [event.reason]));
+    send("start", [inBackground ? "arrière-plan" : "page"]);
+
+    // What hangs: a call to the browser that is still unanswered after 10 s.
+    const describe = (args) => {
+      try { return JSON.stringify(args.filter((arg) => typeof arg !== "function")).slice(0, 300); } catch { return ""; }
+    };
+    const watch = (object, label) => {
+      if (!object || typeof object !== "object") return;
+      const names = new Set();
+      for (let owner = object; owner && owner !== Object.prototype; owner = Object.getPrototypeOf(owner)) {
+        for (const name of Object.getOwnPropertyNames(owner)) names.add(name);
+      }
+      for (const name of names) {
+        if (name === "constructor" || /^on[A-Z]/.test(name)) continue;
+        let original;
+        try { original = object[name]; } catch { continue; }
+        if (typeof original !== "function") continue;
+        replace(object, name, function (...args) {
+          const result = original.apply(object, args);
+          if (result && typeof result.then === "function") {
+            let settled = false;
+            const started = Date.now();
+            result.then(() => { settled = true; }, () => { settled = true; });
+            setTimeout(() => {
+              if (settled) return;
+              send("slow", [`${label}.${name} sans réponse depuis 10 s`, describe(args)]);
+              result.then(() => send("slow", [`${label}.${name} répondu après ${Math.round((Date.now() - started) / 1000)} s`]), () => {});
+            }, 10000);
+          }
+          return result;
+        });
+      }
+    };
+    for (const name of ["runtime", "tabs", "windows", "scripting", "tabGroups", "sidePanel", "debugger", "identity", "alarms",
+                        "permissions", "action", "declarativeNetRequest", "webNavigation", "offscreen", "notifications"]) {
+      watch(native[name], name);
+    }
+    if (native.storage) for (const area of ["local", "session", "sync"]) watch(native.storage[area], `storage.${area}`);
+    // In the background, what it reaches out to, in order: the last line before it goes silent.
+    if (inBackground) {
+      const where = (address) => { try { const url = new URL(String(address)); return url.origin + url.pathname; } catch { return String(address).slice(0, 120); } };
+      const fetchBefore = globalThis.fetch;
+      if (typeof fetchBefore === "function") {
+        globalThis.fetch = (input, init) => {
+          const target = where(input instanceof Request ? input.url : input);
+          send("net", [`fetch ${target}`]);
+          return fetchBefore(input, init).then((response) => { send("net", [`fetch ${target} → ${response.status}`]); return response; },
+            (error) => { send("net", [`fetch ${target} échec ${error && error.message}`]); throw error; });
+        };
+      }
+      const Socket = globalThis.WebSocket;
+      if (typeof Socket === "function") {
+        globalThis.WebSocket = function (address, protocols) {
+          send("net", [`WebSocket ${where(address)}`]);
+          const socket = protocols === undefined ? new Socket(address) : new Socket(address, protocols);
+          socket.addEventListener("open", () => send("net", [`WebSocket ouvert ${where(address)}`]));
+          socket.addEventListener("close", (event) => send("net", [`WebSocket fermé ${where(address)} ${event.code}`]));
+          return socket;
+        };
+        globalThis.WebSocket.prototype = Socket.prototype;
+        Object.assign(globalThis.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+      }
+      if (typeof runtime.connectNative === "function") {
+        const connectNative = runtime.connectNative.bind(runtime);
+        replace(runtime, "connectNative", (application) => { send("net", [`connectNative ${application}`]); return connectNative(application); });
+      }
+      for (const name of ["onStartup", "onInstalled"]) {
+        try { runtime[name].addListener(() => send("event", [name])); } catch {}
+      }
+    }
+    // In the background, a beat: it stops when its thread is held.
+    if (inBackground) {
+      let beats = 0;
+      const beat = setInterval(() => {
+        send("alive", [`${++beats * 15} s`]);
+        if (beats >= 60) clearInterval(beat);
+      }, 15000);
+    }
+  }, () => {});
 })();
