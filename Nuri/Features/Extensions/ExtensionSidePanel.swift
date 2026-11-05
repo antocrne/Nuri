@@ -41,20 +41,6 @@ final class ExtensionSidePanel: NSObject, Identifiable, WKUIDelegate, WKNavigati
 
     func webViewDidClose(_ webView: WKWebView) { close() }
 
-    /// With the log on: what the panel shows a few seconds after each page it loads.
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard ExtensionLog.isOn else { return }
-        let name = self.name
-        for delay in [3.0, 12.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak webView] in
-                webView?.evaluateJavaScript("(document.body && document.body.innerText || '').slice(0, 300)") { value, _ in
-                    let text = (value as? String ?? "nil").replacingOccurrences(of: "\n", with: " / ")
-                    ExtensionLog.note(name, "side panel after \(Int(delay))s: \(text)")
-                }
-            }
-        }
-    }
-
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         ExtensionLog.note(name, "side panel process ended")
         webView.reload()

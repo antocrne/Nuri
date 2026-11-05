@@ -84,41 +84,6 @@
   const inBackground = (typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope)
     || (() => { try { return native.extension.getBackgroundPage() === globalThis; } catch { return false; } })();
 
-  // A WebSocket opened in an extension's service worker ends the worker at once in WebKit (Claude's
-  // bridge to claude.ai, opened as soon as one is signed in): the extension's background is gone,
-  // and its pages, which go through the worker, never load again. There it fails the way a refused
-  // connection does, and the extension carries on without it. Its pages keep real WebSockets.
-  if (typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope && typeof EventTarget === "function") {
-    class RefusedWebSocket extends EventTarget {
-      constructor(address, protocols) {
-        super();
-        this.url = String(address);
-        this.protocol = "";
-        this.extensions = "";
-        this.binaryType = "blob";
-        this.bufferedAmount = 0;
-        this.readyState = RefusedWebSocket.CONNECTING;
-        this.onopen = this.onerror = this.onclose = this.onmessage = null;
-        setTimeout(() => {
-          this.readyState = RefusedWebSocket.CLOSED;
-          const error = new Event("error");
-          this.dispatchEvent(error);
-          if (typeof this.onerror === "function") this.onerror(error);
-          const close = Object.assign(new Event("close"), { code: 1006, reason: "", wasClean: false });
-          this.dispatchEvent(close);
-          if (typeof this.onclose === "function") this.onclose(close);
-        }, 0);
-      }
-      send() { throw new DOMException("WebSocket is not open", "InvalidStateError"); }
-      close() { this.readyState = RefusedWebSocket.CLOSED; }
-    }
-    Object.assign(RefusedWebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
-    Object.assign(RefusedWebSocket.prototype, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
-    try {
-      Object.defineProperty(globalThis, "WebSocket", { value: RefusedWebSocket, configurable: true, writable: true });
-    } catch {}
-  }
-
   // Nuri's questions to the background, sent from a blank page of the extension's own: whether it
   // is there (ExtensionHost.backgroundAnswers; what WebKit tells of a service worker isn't
   // reliable), and for chrome.proxy below. Registered before the extension's own listeners: the
@@ -153,6 +118,95 @@
         ["removeListener", (listener) => remove(wrapper(listener))],
         ["hasListener", (listener) => wrappers.has(listener) && has(wrappers.get(listener))],
       ]) Object.defineProperty(onMessage, name, { value, configurable: true, writable: true, enumerable: true });
+    } catch {}
+  }
+
+  // A WebSocket opened in an extension's service worker ends the worker at once in WebKit (Claude's
+  // bridge to Claude Desktop and claude.ai, opened as soon as one is signed in): the background is
+  // gone, and its pages, which go through the worker, never load again. There, Nuri opens it
+  // instead (ExtensionSockets) and tells the worker what comes (answers.nuriSocket, in order).
+  // Its pages keep WebKit's own WebSockets.
+  if (typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope && typeof EventTarget === "function") {
+    const sockets = new Map();
+    const states = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
+    const toBase64 = (bytes) => {
+      let text = "";
+      for (let index = 0; index < bytes.length; index += 0x8000) text += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+      return btoa(text);
+    };
+    class BridgedWebSocket extends EventTarget {
+      constructor(address, protocols) {
+        super();
+        let url;
+        try { url = new URL(String(address)); } catch { throw new DOMException(`The URL '${address}' is invalid.`, "SyntaxError"); }
+        if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new DOMException("The URL's scheme must be either 'ws' or 'wss'.", "SyntaxError");
+        this.url = url.href;
+        this.protocol = "";
+        this.extensions = "";
+        this.binaryType = "blob";
+        this.bufferedAmount = 0;
+        this.readyState = states.CONNECTING;
+        this.onopen = this.onerror = this.onclose = this.onmessage = null;
+        this.nuriID = crypto.randomUUID();
+        sockets.set(this.nuriID, this);
+        const asked = protocols === undefined ? [] : [].concat(protocols).map(String);
+        toNuri("socket", { open: this.nuriID, url: this.url, protocols: asked })
+          .catch(() => this.nuriEvent({ type: "close", code: 1006, reason: "", wasClean: false, error: true }));
+      }
+      nuriFire(event) {
+        this.dispatchEvent(event);
+        const handler = this[`on${event.type}`];
+        if (typeof handler === "function") { try { handler.call(this, event); } catch (error) { setTimeout(() => { throw error; }); } }
+      }
+      nuriEvent(event) {
+        if (event.type === "open") {
+          if (this.readyState !== states.CONNECTING) return;
+          this.readyState = states.OPEN;
+          this.protocol = event.protocol || "";
+          this.nuriFire(new Event("open"));
+        } else if (event.type === "message") {
+          if (this.readyState !== states.OPEN) return;
+          let data = event.text;
+          if (data === undefined) {
+            const bytes = Uint8Array.from(atob(event.binary || ""), (c) => c.charCodeAt(0));
+            data = this.binaryType === "arraybuffer" ? bytes.buffer : new Blob([bytes]);
+          }
+          this.nuriFire(new MessageEvent("message", { data, origin: new URL(this.url).origin }));
+        } else if (event.type === "close") {
+          if (this.readyState === states.CLOSED) return;
+          this.readyState = states.CLOSED;
+          sockets.delete(this.nuriID);
+          if (event.error) this.nuriFire(new Event("error"));
+          this.nuriFire(Object.assign(new Event("close"), { code: event.code ?? 1006, reason: event.reason || "", wasClean: !!event.wasClean }));
+        }
+      }
+      send(data) {
+        if (this.readyState === states.CONNECTING) throw new DOMException("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", "InvalidStateError");
+        if (this.readyState !== states.OPEN) return;
+        const id = this.nuriID;
+        const out = (message) => toNuri("socket", { send: id, ...message }).catch(() => {});
+        if (typeof data === "string") return void out({ text: data });
+        if (data instanceof Blob) return void data.arrayBuffer().then((buffer) => out({ binary: toBase64(new Uint8Array(buffer)) }));
+        if (data instanceof ArrayBuffer) return void out({ binary: toBase64(new Uint8Array(data)) });
+        if (ArrayBuffer.isView(data)) return void out({ binary: toBase64(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)) });
+        out({ text: String(data) });
+      }
+      close(code, reason) {
+        if (this.readyState === states.CLOSING || this.readyState === states.CLOSED) return;
+        this.readyState = states.CLOSING;
+        toNuri("socket", { close: this.nuriID, code: code ?? 1000, reason: reason ?? "" }).catch(() => {});
+      }
+    }
+    Object.assign(BridgedWebSocket, states);
+    Object.assign(BridgedWebSocket.prototype, states);
+    answers.nuriSocket = (event) => {
+      const socket = event && sockets.get(event.id);
+      if (!socket) return false;
+      socket.nuriEvent(event);
+      return true;
+    };
+    try {
+      Object.defineProperty(globalThis, "WebSocket", { value: BridgedWebSocket, configurable: true, writable: true });
     } catch {}
   }
 
@@ -798,7 +852,7 @@
     let sent = 0;
     const where = (globalThis.location && globalThis.location.pathname) || "background";
     const send = (kind, parts) => {
-      if (sent++ > 600) return;
+      if (sent++ > 300) return;
       const text = parts.map((part) => {
         if (part instanceof Error) return `${part.name}: ${part.message}\n${part.stack || ""}`;
         if (typeof part === "object") { try { return JSON.stringify(part); } catch { return String(part); } }
@@ -810,13 +864,8 @@
       const original = console[kind].bind(console);
       console[kind] = (...parts) => { send(kind, parts); original(...parts); };
     }
-    for (const kind of ["log", "info"]) {
-      const original = console[kind].bind(console);
-      console[kind] = (...parts) => { send(kind, parts); original(...parts); };
-    }
     globalThis.addEventListener("error", (event) => send("exception", [event.error || event.message, event.filename || "", event.lineno || ""]));
     globalThis.addEventListener("unhandledrejection", (event) => send("rejection", [event.reason]));
-    send("start", [inBackground ? "arrière-plan" : "page"]);
 
     // What hangs: a call to the browser that is still unanswered after 10 s.
     const describe = (args) => {
@@ -854,45 +903,5 @@
       watch(native[name], name);
     }
     if (native.storage) for (const area of ["local", "session", "sync"]) watch(native.storage[area], `storage.${area}`);
-    // In the background, what it reaches out to, in order: the last line before it goes silent.
-    if (inBackground) {
-      const where = (address) => { try { const url = new URL(String(address)); return url.origin + url.pathname; } catch { return String(address).slice(0, 120); } };
-      const fetchBefore = globalThis.fetch;
-      if (typeof fetchBefore === "function") {
-        globalThis.fetch = (input, init) => {
-          const target = where(input instanceof Request ? input.url : input);
-          send("net", [`fetch ${target}`]);
-          return fetchBefore(input, init).then((response) => { send("net", [`fetch ${target} → ${response.status}`]); return response; },
-            (error) => { send("net", [`fetch ${target} échec ${error && error.message}`]); throw error; });
-        };
-      }
-      const Socket = globalThis.WebSocket;
-      if (typeof Socket === "function") {
-        globalThis.WebSocket = function (address, protocols) {
-          send("net", [`WebSocket ${where(address)}`]);
-          const socket = protocols === undefined ? new Socket(address) : new Socket(address, protocols);
-          socket.addEventListener("open", () => send("net", [`WebSocket ouvert ${where(address)}`]));
-          socket.addEventListener("close", (event) => send("net", [`WebSocket fermé ${where(address)} ${event.code}`]));
-          return socket;
-        };
-        globalThis.WebSocket.prototype = Socket.prototype;
-        Object.assign(globalThis.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
-      }
-      if (typeof runtime.connectNative === "function") {
-        const connectNative = runtime.connectNative.bind(runtime);
-        replace(runtime, "connectNative", (application) => { send("net", [`connectNative ${application}`]); return connectNative(application); });
-      }
-      for (const name of ["onStartup", "onInstalled"]) {
-        try { runtime[name].addListener(() => send("event", [name])); } catch {}
-      }
-    }
-    // In the background, a beat: it stops when its thread is held.
-    if (inBackground) {
-      let beats = 0;
-      const beat = setInterval(() => {
-        send("alive", [`${++beats * 15} s`]);
-        if (beats >= 60) clearInterval(beat);
-      }, 15000);
-    }
   }, () => {});
 })();

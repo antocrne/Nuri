@@ -1637,7 +1637,20 @@ final class FeatureSelfTest {
              "background":{"service_worker":"worker.js"}}
             """
         try? manifest.write(to: folder.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
-        try? "self.addEventListener('message', () => {});".write(to: folder.appendingPathComponent("worker.js"), atomically: true, encoding: .utf8)
+        let worker = """
+            chrome.runtime.onMessage.addListener((message, sender, reply) => {
+              if (!message || message.kind !== "ws") return;
+              const seen = [];
+              const socket = new WebSocket(message.url);
+              socket.onopen = () => { seen.push("open"); socket.send("bonjour"); };
+              socket.onmessage = (event) => { seen.push("message:" + event.data); socket.close(1000, "fini"); };
+              socket.onerror = () => seen.push("error");
+              socket.onclose = (event) => { seen.push("close:" + event.code); reply(seen); };
+              return true;
+            });
+            chrome.runtime.onMessage.addListener((message, sender, reply) => { if (message && message.kind === "alive") reply("oui"); });
+            """
+        try? worker.write(to: folder.appendingPathComponent("worker.js"), atomically: true, encoding: .utf8)
         try? "<!doctype html><title>origine</title>".write(to: folder.appendingPathComponent("page.html"), atomically: true, encoding: .utf8)
         do { _ = try await host.add(from: folder, id: id, source: .webStore, asks: false) } catch { note("Origine : \(error)") }
         let tab = browser.openTab(url: URL(string: "webkit-extension://\(id)/page.html"))
@@ -1665,6 +1678,19 @@ final class FeatureSelfTest {
                                         arguments: ["base": base], world: .page, timeout: 5)
         check("Origine : une page web garde la sienne", origin(server.lastRequest) == "Origin: \(base)", origin(server.lastRequest))
         browser.close(web)
+
+        // A WebSocket from its service worker: opened by Nuri, the worker lives on.
+        if let echo = EchoSocketServer(), let port = await echo.start() {
+            let seen = await tab.webView?.nuriCall("""
+                return await Promise.race([chrome.runtime.sendMessage({ kind: "ws", url }), new Promise((done) => setTimeout(() => done("délai"), 8000))]);
+                """, arguments: ["url": "ws://127.0.0.1:\(port)/echo"], world: .page, timeout: 10)
+            let list = seen as? [String] ?? []
+            check("Origine : un WebSocket de son arrière-plan s'ouvre, échange et se ferme", list == ["open", "message:bonjour", "close:1000"], "\(String(describing: seen))")
+            check("Origine : ce WebSocket part avec l'origine de Chrome", echo.origin == "chrome-extension://\(id)", echo.origin ?? "aucune")
+            let alive = await tab.webView?.nuriCall("return await chrome.runtime.sendMessage({ kind: 'alive' });", world: .page, timeout: 5) as? String
+            check("Origine : son arrière-plan vit encore après", alive == "oui", alive ?? "nil")
+            echo.stop()
+        }
         browser.close(tab)
         host.remove(id)
     }
@@ -2877,6 +2903,59 @@ final class FeatureSelfTest {
         host.setEnabled(false, for: id)
         check("VPN : extension désactivée, plus de serveur", proxy.server == nil)
     }
+}
+
+/// A WebSocket server for the origine section: sends back each message, notes the Origin.
+private final class EchoSocketServer: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "nuri.selftest.websocket")
+    private let state = OSAllocatedUnfairLock<String?>(initialState: nil)
+    var origin: String? { state.withLock { $0 } }
+
+    init?() {
+        let options = NWProtocolWebSocket.Options()
+        options.autoReplyPing = true
+        options.setClientRequestHandler(queue) { [state] _, headers in
+            state.withLock { $0 = headers.first { $0.name.lowercased() == "origin" }?.value ?? ("aucune parmi : " + headers.map(\.name).joined(separator: ", ")) }
+            return NWProtocolWebSocket.Response(status: .accept, subprotocol: nil)
+        }
+        let parameters = NWParameters.tcp
+        parameters.defaultProtocolStack.applicationProtocols.insert(options, at: 0)
+        guard let listener = try? NWListener(using: parameters, on: .any) else { return nil }
+        self.listener = listener
+    }
+
+    func start() async -> UInt16? {
+        listener.newConnectionHandler = { [queue] connection in
+            connection.start(queue: queue)
+            func echo() {
+                connection.receiveMessage { data, context, _, error in
+                    guard error == nil, let data, let context,
+                          let metadata = context.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata else { return }
+                    if metadata.opcode == .close { return connection.cancel() }
+                    let reply = NWProtocolWebSocket.Metadata(opcode: metadata.opcode)
+                    connection.send(content: data, contentContext: NWConnection.ContentContext(identifier: "echo", metadata: [reply]), isComplete: true, completion: .idempotent)
+                    echo()
+                }
+            }
+            echo()
+        }
+        let once = OSAllocatedUnfairLock(initialState: false)
+        return await withCheckedContinuation { continuation in
+            listener.stateUpdateHandler = { [listener] state in
+                let port: UInt16?
+                switch state {
+                case .ready: port = listener.port?.rawValue
+                case .failed, .cancelled: port = nil
+                default: return
+                }
+                if once.withLock({ done in defer { done = true }; return !done }) { continuation.resume(returning: port) }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    func stop() { listener.cancel() }
 }
 
 /// A proxy for the vpn section: HTTP CONNECT only, wanting `password` for the user nuri, noting

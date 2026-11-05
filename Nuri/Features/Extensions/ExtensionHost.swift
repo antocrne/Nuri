@@ -276,6 +276,8 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
     private func unload(_ id: String, reloading: Bool = false) {
         ExtensionProxy.shared.release(id, telling: false)
         closeSidePanels(of: id)
+        ExtensionSockets.shared.closeAll(of: id)
+        messengers[id] = nil
         if !reloading { ExtensionNative.forget(id) }
         guard let context = contexts[id] else { return }
         try? controller?.unload(context)
@@ -367,7 +369,6 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
         guard let context = contexts[id] else { return }
         let tab = browser.selectedTab.map(adapter(for:))
         Task {
-            ExtensionNative.note(context, "action clicked")
             if await backgroundWorkerIsLost(context) {
                 await revive(context)
                 if let revived = contexts[id] { _ = await backgroundAnswers(revived) }
@@ -431,7 +432,7 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
               browser.runtime.sendMessage({ nuriPing: true }).then((reply) => !!(reply && reply.nuriPong), () => false),
               new Promise((done) => setTimeout(() => done(false), 3000))]);
             """, world: .page, timeout: 4) as? Bool
-        ExtensionNative.note(context, "background check: \(answer.map { $0 ? "answers" : "no answer" } ?? "page didn't run")")
+        if answer != true { ExtensionNative.note(context, "background check: \(answer == false ? "no answer" : "its page didn't run")") }
         return answer ?? false
     }
 
@@ -532,6 +533,39 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
     func tellProxyChanged(_ id: String, _ details: [String: Any]) {
         guard let context = contexts[id] else { return }
         Task { _ = await askBackground(context, ["nuriProxyChanged": details], timeout: 5) }
+    }
+
+    // MARK: - Telling the background (ExtensionSockets)
+
+    /// A page of each extension's own, kept to tell its background what Nuri receives for it.
+    @ObservationIgnored private var messengers: [String: WKWebView] = [:]
+    @ObservationIgnored private var tellings: [String: Task<Void, Never>] = [:]
+
+    /// `message` to extension-shim.js in its background, after those before it. `done`: whether
+    /// the background took it (true when the shim answered true).
+    func tellBackground(_ id: String, _ message: [String: Any], done: @escaping (Bool) -> Void = { _ in }) {
+        guard let context = contexts[id] else { return done(false) }
+        let previous = tellings[id]
+        tellings[id] = Task {
+            await previous?.value
+            done(await deliver(message, to: context))
+        }
+    }
+
+    private func deliver(_ message: [String: Any], to context: WKWebExtensionContext) async -> Bool {
+        let id = context.uniqueIdentifier
+        guard contexts[id] === context else { return false }
+        var page = messengers[id]
+        if page?.url == nil {
+            page = await blankPage(of: context)
+            messengers[id] = page
+        }
+        let answer = await page?.nuriCall("""
+            return await browser.runtime.sendMessage(message).then((reply) => reply === true, () => null);
+            """, arguments: ["message": message], world: .page, timeout: 10) as? Bool
+        // No answer at all: the page is made again next time.
+        if answer == nil { messengers[id] = nil }
+        return answer == true
     }
 
     /// A question for extension-shim.js in its background, from a blank page of its own (see
@@ -642,7 +676,6 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
             showSidePanel(panelURL, of: extensionContext, in: browser.isPrivate ? BrowserWindows.shared.normalTarget : browser)
             return completionHandler(nil, nil)
         }
-        ExtensionNative.note(extensionContext, "tab opened: \(configuration.url?.absoluteString.prefix(160) ?? "nil")")
         let tab = browser.openTab(url: configuration.url, background: !configuration.shouldBeActive,
                                   after: (configuration.parentTab as? ExtensionTab)?.tab)
         if configuration.shouldBeMuted { tab.setMuted(true) }
@@ -652,7 +685,6 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
     func webExtensionController(_ controller: WKWebExtensionController, openNewWindowUsing configuration: WKWebExtension.WindowConfiguration,
                                 for extensionContext: WKWebExtensionContext, completionHandler: @escaping ((any WKWebExtensionWindow)?, (any Error)?) -> Void) {
         // Extensions are kept out of private windows, even at their own request.
-        ExtensionNative.note(extensionContext, "window opened: \(configuration.tabURLs.map { $0.absoluteString.prefix(160) })")
         let browser = BrowserWindows.shared.openNormalWindow()
         for url in configuration.tabURLs { browser.openTab(url: url) }
         completionHandler(adapter(for: browser), nil)
@@ -715,26 +747,7 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
             return
         }
         let app = String(identifier.dropFirst(ExtensionNative.prefix.count))
-        let started = Date()
-        let summary = ExtensionLog.isOn && app != "log" ? Self.summary(of: message) : ""
-        if !summary.isEmpty { ExtensionNative.note(extensionContext, "→ \(app) \(summary)") }
-        Task {
-            let reply = await ExtensionNative.handle(app, message, from: extensionContext)
-            if !summary.isEmpty {
-                ExtensionNative.note(extensionContext, "← \(app) \(String(format: "%.2f", Date().timeIntervalSince(started))) s")
-            }
-            replyHandler(reply, nil)
-        }
-    }
-
-    /// The keys of a message to Nuri, for the log.
-    private static func summary(of message: Any) -> String {
-        guard let body = message as? [String: Any] else { return "" }
-        return body.keys.sorted().map { key in
-            if key == "command", let command = body[key] as? String { return command }
-            if key == "url", let address = body[key] as? String { return String(address.prefix(80)) }
-            return key
-        }.joined(separator: ",")
+        Task { replyHandler(await ExtensionNative.handle(app, message, from: extensionContext), nil) }
     }
 
     // MARK: - Side panel (chrome.sidePanel, extension-shim.js)
@@ -757,7 +770,6 @@ final class ExtensionHost: NSObject, WKWebExtensionControllerDelegate {
     func showSidePanel(_ url: URL, of context: WKWebExtensionContext, in browser: BrowserModel) {
         guard !browser.isPrivate, let configuration = context.webViewConfiguration else { return }
         if let panel = browser.sidePanel, panel.extensionID == context.uniqueIdentifier {
-            ExtensionNative.note(context, "side panel asked again: \(url.absoluteString)")
             if panel.webView.url != url { panel.webView.load(URLRequest(url: url)) }
             return
         }

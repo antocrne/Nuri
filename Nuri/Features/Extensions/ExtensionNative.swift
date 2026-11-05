@@ -22,6 +22,7 @@ enum ExtensionNative {
         case "tabgroups": return TabGroups.of(context.uniqueIdentifier).handle(body)
         case "debugger": return await ExtensionDebugger.handle(body, from: context)
         case "identity": return await ExtensionAuthFlow.handle(body, from: context)
+        case "socket": return ExtensionSockets.shared.handle(body, from: context)
         case "headers": return headers(body, from: context)
         case "log": return log(body, from: context)
         default: return refusal
