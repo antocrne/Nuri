@@ -1,6 +1,6 @@
 # Nuri
 
-**Un navigateur léger, sans compte, sans pisteur.** Version **0.1.5**. *Nuri* veut dire « le monde » en coréen.
+**Un navigateur léger, sans compte, sans pisteur.** Version **0.1.6**. *Nuri* veut dire « le monde » en coréen.
 
 - App macOS native : Swift, SwiftUI et AppKit, sur WebKit (le moteur déjà présent dans le Mac). Pas de Chromium, pas d'Electron, aucune dépendance.
 - macOS 14 minimum, Apple silicon.
@@ -78,7 +78,7 @@ Compiler avec un dossier de build hors de `~/Documents` : iCloud y ajoute des at
 | Mises à jour | Au lancement puis toutes les 6 h, désactivable. Rien n'est téléchargé sans accord ; une version n'est installée que si sa signature est celle de Nuri |
 | Passkeys | Pas encore : WebKit ne les accepte, pour n'importe quel site, que d'une app qui a l'autorisation `com.apple.developer.web-browser.public-key-credential`, accordée par Apple sur demande (Firefox l'a). Sans elle, « Se connecter avec une passkey » échoue, Apple compris ; le mot de passe reste possible |
 
-Hors de la 0.1.5 : gestionnaire de mots de passe intégré (ils passent par les extensions).
+Hors de la 0.1.6 : gestionnaire de mots de passe intégré (ils passent par les extensions).
 
 Extensions essayées (`-NuriSelfTestOnly extensions -NuriSelfTestStore id,id`) : Dark Reader, uBlock Origin Lite, SponsorBlock, Grammarly, Proton Pass et Bitwarden ouvrent leur fenêtre ; 1Password ouvre sa page d'accueil dans un onglet (sa fenêtre vient une fois un compte ajouté) ; Return YouTube Dislike se charge. Proton Pass a été essayé avec un vrai compte (0.1.3) ; pour Bitwarden et 1Password, connexion et remplissage restent à essayer.
 Ce qui rapproche WebKit de Chrome, repris de Void : la copie d'une extension gardée par Nuri reçoit `extension-shim.js`, exécuté en premier dans son arrière-plan, ses pages, ses scripts de contenu et les scripts qu'elle injecte. Il garde à WebKit ses objets `chrome` et `browser` (Proton Pass les remplace, et WebKit ne pouvait plus rien lui transmettre), fournit des substituts aux API absentes et `requestIdleCallback`, et répond comme Chrome à `tabs.getCurrent()` dans un popup. WebKit perd aussi le service worker d'une extension chargée au lancement, quelques secondes plus tard : Nuri l'interroge, et appelle `runtime.reload()` s'il ne répond plus (`-NuriSelfTestOnly lancement -NuriSelfTestDir dossier`, deux fois de suite, le montre). Les fenêtres des extensions sont redimensionnables, par le coin en bas à droite. Les mises à jour : une fois par jour, désactivable, ou à la demande dans les Réglages.
