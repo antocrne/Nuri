@@ -91,6 +91,8 @@ enum WebViewFactory {
         wv.allowsMagnification = true
         wv.autoresizingMask = [.width, .height]
         wv.underPageBackgroundColor = .clear
+        Geolocation.shared.attach(to: wv)
+        InspectorLinks.attach(to: wv)
         return wv
     }
 }

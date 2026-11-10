@@ -65,7 +65,7 @@ enum WebKitSPI {
         return inspector.perform(getter)?.takeUnretainedValue() as? WKWebView
     }
 
-    private static func inspector(of webView: WKWebView) -> NSObject? {
+    static func inspector(of webView: WKWebView) -> NSObject? {
         let getter = NSSelectorFromString("_inspector")
         guard webView.responds(to: getter) else { return nil }
         return webView.perform(getter)?.takeUnretainedValue() as? NSObject

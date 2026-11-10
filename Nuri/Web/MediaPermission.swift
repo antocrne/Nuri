@@ -64,6 +64,8 @@ enum MediaPermission {
     #if DEBUG
     /// Requests that reached Nuri (self-test: WebKit refuses on its own when its delegate isn't found).
     private(set) static var requests = 0
+    /// Self-tests: the answer to a page asking for the location, without asking anyone.
+    static var testLocationAnswer: WKPermissionDecision?
     #endif
 
     /// `ask` shows the question ("Autoriser … ?") and returns the answer.
@@ -93,6 +95,7 @@ enum MediaPermission {
         requests += 1
         #endif
         #if DEBUG
+        if let testLocationAnswer { return testLocationAnswer }
         if SelfTestRunner.isRequested { return .deny }
         #endif
         switch CLLocationManager().authorizationStatus {

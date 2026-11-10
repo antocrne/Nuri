@@ -15,6 +15,7 @@
 		0E2D54D27A10FC23B91B14A3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 63AAB00D7A3D3F4F3FA6F510 /* Assets.xcassets */; };
 		0E2FEDB125E805FA12EFD730 /* ReaderMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1016B6C9424FA2D208FEED9 /* ReaderMode.swift */; };
 		1242605B19FF922EC6A88D97 /* WebKitSPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 442902905E4168FC6AFEAD92 /* WebKitSPI.swift */; };
+		12EA477130D693477D84D9AB /* Geolocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6FA18C1CDBE5282056BEBBB /* Geolocation.swift */; };
 		1BE7CF3FD21E53C47C20EA37 /* TabWebDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4884986A033B97CFE0ADAA0A /* TabWebDelegate.swift */; };
 		1E8E1B07839353A5D34CB0B7 /* Updater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B5CEBF81DB2212010F04896 /* Updater.swift */; };
 		1EB1FB62AB2B167A805765EC /* BrowserModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64917E11F7185C37523368A2 /* BrowserModel.swift */; };
@@ -49,6 +50,7 @@
 		9D36CE02A24F01FF0A360758 /* FloatingPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41262CD35DAFB93F39665C23 /* FloatingPlayer.swift */; };
 		A021EAF6E0C73B10369ED8E3 /* AdBlockList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B713DF8BFD9991A75E8E951 /* AdBlockList.swift */; };
 		A6ADEC4EC9F73A1A8ECC5F49 /* ExtensionDebugger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D878073498D637CB1D103B7 /* ExtensionDebugger.swift */; };
+		A73D0B3C8961789CB6982C54 /* InspectorLinks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 085583269978FBD897D4C3D8 /* InspectorLinks.swift */; };
 		AC6CE1FF9C031CDAF484E02F /* TrackingParameters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A39A9DC678427FE8F025CBD /* TrackingParameters.swift */; };
 		AE9443FF48406C2BBBBDA375 /* ExtensionNative.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943653D0791C187F07637ABE /* ExtensionNative.swift */; };
 		B6DB2836667C4C1129F86C70 /* ScriptMessageRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0278B6C253DB18E17E7DA95 /* ScriptMessageRouter.swift */; };
@@ -80,6 +82,7 @@
 
 /* Begin PBXFileReference section */
 		0683D30DC220F62F23000136 /* Scripts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Scripts; path = Nuri/Resources/Scripts; sourceTree = SOURCE_ROOT; };
+		085583269978FBD897D4C3D8 /* InspectorLinks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorLinks.swift; sourceTree = "<group>"; };
 		0A39A9DC678427FE8F025CBD /* TrackingParameters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackingParameters.swift; sourceTree = "<group>"; };
 		0B713DF8BFD9991A75E8E951 /* AdBlockList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdBlockList.swift; sourceTree = "<group>"; };
 		1058E415411F8E2C4961FA4E /* SplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitView.swift; sourceTree = "<group>"; };
@@ -146,6 +149,7 @@
 		DB61BBA6708667ED476F23C3 /* BrowserRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserRootView.swift; sourceTree = "<group>"; };
 		DC213617C794A1AB40CC603A /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		DF4432E3EEBC51879C4A8C04 /* SQLiteDB.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteDB.swift; sourceTree = "<group>"; };
+		E6FA18C1CDBE5282056BEBBB /* Geolocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Geolocation.swift; sourceTree = "<group>"; };
 		E85B2B61248AE26F3F0723C1 /* ExtensionAuthFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionAuthFlow.swift; sourceTree = "<group>"; };
 		EA2D1D415F05BD64A325BC9B /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		EB782D4D91E68D90B25812D8 /* TabStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStrip.swift; sourceTree = "<group>"; };
@@ -284,6 +288,8 @@
 			children = (
 				624519E4BE76EB0687D4F92B /* ExternalURLPolicy.swift */,
 				A31712AADB9F35E9FD4DD419 /* FaviconLoader.swift */,
+				E6FA18C1CDBE5282056BEBBB /* Geolocation.swift */,
+				085583269978FBD897D4C3D8 /* InspectorLinks.swift */,
 				9D05669E8766CF425E025A1F /* LocalNetwork.swift */,
 				55D724FE9B1112872665C9C8 /* MediaPermission.swift */,
 				29F2FB18B1A324F926541930 /* NuriWebView.swift */,
@@ -530,8 +536,10 @@
 				6E208FAFB0119B1DFC89C57D /* ExternalURLPolicy.swift in Sources */,
 				68563027A276661742DA431B /* FaviconLoader.swift in Sources */,
 				9D36CE02A24F01FF0A360758 /* FloatingPlayer.swift in Sources */,
+				12EA477130D693477D84D9AB /* Geolocation.swift in Sources */,
 				5231F81C75BFA1B58B1D5ACC /* HistoryStore.swift in Sources */,
 				F49842FD5E6C6123C9629E7C /* HistoryWindow.swift in Sources */,
+				A73D0B3C8961789CB6982C54 /* InspectorLinks.swift in Sources */,
 				D60D6B04CD0D4E886EE2941A /* Language.swift in Sources */,
 				343DC66AB1B16008424A075E /* LocalNetwork.swift in Sources */,
 				D49BE3F23937A006F43B358E /* Log.swift in Sources */,

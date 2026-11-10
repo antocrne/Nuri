@@ -40,6 +40,10 @@ struct TabStrip: View {
             }
             let widths = tabWidths(available: geometry.size.width - (pair == nil ? 0 : Self.blockInset * 2), count: entries.count)
             let width = { (tab: Tab) in tab === browser.selectedTab ? widths.active : widths.normal }
+            // What of the bar is on screen, for a tab shown wide to stay inside it.
+            let frame = geometry.frame(in: .named(WindowSpace.name))
+            let bar = frame.minX...max(frame.minX, frame.maxX)
+            let expanded = browser.expandedTabID
             ScrollViewReader { reader in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: Self.spacing) {
@@ -47,16 +51,20 @@ struct TabStrip: View {
                             if let pair, space.split?.contains(entry.id) == true {
                                 if entry.id == pair.first {
                                     HStack(spacing: Self.blockInset) {
-                                        TabChip(tab: pair.left.tab, width: width(pair.left.tab), reorderable: pair.left.reorderable).id(pair.left.id)
-                                        TabChip(tab: pair.right.tab, width: width(pair.right.tab), reorderable: pair.right.reorderable).id(pair.right.id)
+                                        TabChip(tab: pair.left.tab, width: width(pair.left.tab), reorderable: pair.left.reorderable, bar: bar)
+                                            .id(pair.left.id).zIndex(expanded == pair.left.id ? 1 : 0)
+                                        TabChip(tab: pair.right.tab, width: width(pair.right.tab), reorderable: pair.right.reorderable, bar: bar)
+                                            .id(pair.right.id).zIndex(expanded == pair.right.id ? 1 : 0)
                                     }
                                     .padding(Self.blockInset)
                                     .background(RoundedRectangle(cornerRadius: Metrics.controlRadius + Self.blockInset, style: .continuous).fill(Theme.control))
                                     .accessibilityElement(children: .contain)
                                     .accessibilityLabel(L("Vue partagée", "Split View"))
+                                    .zIndex(expanded.map { space.split?.contains($0) == true } == true ? 1 : 0)
                                 }
                             } else {
-                                TabChip(tab: entry.tab, width: width(entry.tab), reorderable: entry.reorderable).id(entry.id)
+                                TabChip(tab: entry.tab, width: width(entry.tab), reorderable: entry.reorderable, bar: bar)
+                                    .id(entry.id).zIndex(expanded == entry.id ? 1 : 0)
                             }
                         }
                         newTabButton
@@ -104,35 +112,136 @@ struct TabChip: View {
     let width: CGFloat
     /// Tabs of the bar move among themselves; a folder's tab shown next to its folder doesn't.
     let reorderable: Bool
+    /// The bar's span on screen, in the window: a tab shown wide stays inside it.
+    let bar: ClosedRange<CGFloat>
     @Environment(BrowserModel.self) private var browser
     @State private var pointerInside = false
+    @State private var expanding: Task<Void, Never>?
 
     /// While a tab is carried the others pass under the pointer: none of them lights up.
     private var hovering: Bool { pointerInside && browser.carry == nil }
 
+    private var pointerless: Bool {
+        #if DEBUG
+        browser.expandsWithoutPointer
+        #else
+        false
+        #endif
+    }
+
     var body: some View {
         let selected = browser.selectedTab === tab
         let carried = browser.carry?.tabID == tab.id
-        chip(selected: selected)
+        let wide = wideWidth
+        let expandable = !selected && wide > width + 6
+        // Read first, always: SwiftUI then redraws this tab whenever another one is shown wide.
+        let expanded = browser.expandedTabID == tab.id && expandable && (hovering || pointerless)
+        let fromLeading = growsFromLeading(wide)
+        chip(selected: selected, expanded: expanded)
             .frame(width: width)
+            .overlay(alignment: fromLeading ? .leading : .trailing) {
+                if expanded { wideCard(width: wide, fromLeading: fromLeading).transition(.opacity) }
+            }
+            // Its close button, at the end that stays put: the card itself lets the pointer through.
+            .overlay(alignment: fromLeading ? .leading : .trailing) {
+                if expanded {
+                    TabMiniButton(symbol: "xmark", help: L("Fermer l'onglet (⌘W)", "Close tab (⌘W)"), tint: Theme.secondaryText) {
+                        browser.requestClose(tab)
+                    }
+                    .padding(.horizontal, 5)
+                    .transition(.opacity)
+                }
+            }
             .opacity(carried ? 0 : 1)
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(WindowSpace.name)) } action: { browser.tabFrames[tab.id] = $0 }
-            .onHover { pointerInside = $0 }
+            .onHover { pointerMoved(inside: $0, expandable: expandable) }
             .animation(Theme.quick, value: hovering)
+            .animation(Theme.quick, value: expanded)
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .named(WindowSpace.name))
                     .onChanged { browser.tabDragChanged(tab, location: $0.location, translation: $0.translation) }
                     .onEnded { browser.tabDragEnded(tab, translation: $0.translation) }
             )
             .contextMenu { TabMenu(tab: tab) }
-            .help(selected ? L("\(tab.displayTitle) : rechercher ou saisir une adresse (⌘L)", "\(tab.displayTitle): search or enter an address (⌘L)") : tab.displayTitle)
+            // A tab shown wide already says its title: no tooltip over it a second later.
+            .help(selected ? L("\(tab.displayTitle) : rechercher ou saisir une adresse (⌘L)", "\(tab.displayTitle): search or enter an address (⌘L)") : (expandable ? "" : tab.displayTitle))
             .accessibilityElement(children: .contain)
             .accessibilityLabel(tab.displayTitle)
             .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
     }
 
+    // MARK: Shown wide
+
+    private static let titleFont = NSFont.systemFont(ofSize: 12)
+    private static let wideMax: CGFloat = 280
+    /// Before the first tab is shown wide: passing over the bar shows nothing.
+    private static let expandDelay: Duration = .milliseconds(280)
+    /// Within this of the last one, the next tab is shown wide at once, as the pointer goes along.
+    private static let chainWindow: TimeInterval = 0.6
+
+    /// What its title needs: margins, close button, icon, title (the card's spacing between each), sound.
+    private var wideWidth: CGFloat {
+        let title = ceil((tab.displayTitle as NSString).size(withAttributes: [.font: Self.titleFont]).width)
+        let sound: CGFloat = tab.isAudible || tab.isMuted ? 9.5 + 6 : 0
+        return min(Self.wideMax, 5 + 18 + 6 + 15 + 6 + title + 6 + sound + 9 + 4)
+    }
+
+    /// From its left edge, unless that would take it past the end of the bar.
+    private func growsFromLeading(_ wide: CGFloat) -> Bool {
+        guard let frame = browser.tabFrames[tab.id] else { return true }
+        return frame.minX + wide <= bar.upperBound - 2 || frame.maxX - wide < bar.lowerBound
+    }
+
+    private func pointerMoved(inside: Bool, expandable: Bool) {
+        pointerInside = inside
+        expanding?.cancel()
+        expanding = nil
+        if inside, expandable {
+            let chained = browser.expandedTabID != nil || Date().timeIntervalSince(browser.expandedTabLeftAt) < Self.chainWindow
+            if chained {
+                browser.expandedTabID = tab.id
+            } else {
+                expanding = Task { @MainActor in
+                    try? await Task.sleep(for: Self.expandDelay)
+                    guard !Task.isCancelled, pointerInside, browser.carry == nil else { return }
+                    browser.expandedTabID = tab.id
+                }
+            }
+        } else if !inside, browser.expandedTabID == tab.id {
+            browser.expandedTabID = nil
+            browser.expandedTabLeftAt = Date()
+        }
+    }
+
+    /// The tab at the width of its title, over its neighbours. Only a picture: the pointer goes
+    /// through it to the tabs underneath, so moving along the bar shows each one in turn.
+    private func wideCard(width: CGFloat, fromLeading: Bool) -> some View {
+        HStack(spacing: 6) {
+            if fromLeading { Color.clear.frame(width: 18) }
+            TabIcon(tab: tab)
+            Text(tab.displayTitle)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if tab.isAudible || tab.isMuted {
+                Image(systemName: tab.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(tab.isMuted ? Theme.secondaryText : Theme.accent)
+            }
+            if !fromLeading { Color.clear.frame(width: 18) }
+        }
+        .padding(.leading, fromLeading ? 5 : 9)
+        .padding(.trailing, fromLeading ? 9 : 5)
+        .frame(width: max(width, self.width), height: Metrics.tabHeight)
+        .background(RoundedRectangle(cornerRadius: Metrics.controlRadius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Metrics.controlRadius, style: .continuous).stroke(Theme.hairline))
+        .shadow(color: Theme.shadow.opacity(0.6), radius: 4, y: 1.5)
+        .allowsHitTesting(false)
+    }
+
     @ViewBuilder
-    private func chip(selected: Bool) -> some View {
+    private func chip(selected: Bool, expanded: Bool) -> some View {
         let compact = width < 62 && !selected
         HStack(spacing: 6) {
             TabIcon(tab: tab)
@@ -145,7 +254,8 @@ struct TabChip: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
-            if !compact || !hovering { accessories(selected: selected, compact: compact) }
+            // Shown wide, its buttons are on the card (they would be under it, in the middle of the title).
+            if !expanded, !compact || !hovering { accessories(selected: selected, compact: compact) }
         }
         .padding(.leading, compact ? 0 : 8)
         .padding(.trailing, compact ? 0 : (selected ? 4 : 8))

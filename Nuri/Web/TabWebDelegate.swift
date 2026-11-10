@@ -86,15 +86,18 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     private static let middleButton = 4
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
-        var download = !navigationResponse.canShowMIMEType
         // "attachment" in any frame: Google Drive and others download through a hidden frame,
         // where a PDF or an image would otherwise be shown to nobody.
-        if let http = navigationResponse.response as? HTTPURLResponse,
-           let disposition = http.value(forHTTPHeaderField: "Content-Disposition"),
-           disposition.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("attachment") {
-            download = true
-        }
+        var download = !navigationResponse.canShowMIMEType || isAttachment(navigationResponse.response)
         let response = navigationResponse.response
+        // A web page WebKit says it can't show: never true of HTML, yet it happened with YouTube typed
+        // in the address bar, and its home page landed in Téléchargements ("www.youtube.com.html", no
+        // address kept). WebKit shows it when let through (it reads what it gets), so it is.
+        if download, !navigationResponse.canShowMIMEType, navigationResponse.isForMainFrame, !isAttachment(response),
+           Self.isWebPage(response) {
+            Log.downloads.error("Page HTML donnée comme impossible à afficher (type « \(response.mimeType ?? "aucun", privacy: .public) », adresse \(response.url == nil ? "absente" : "présente", privacy: .public)) : affichée")
+            download = false
+        }
         StrictTransport.record(response, in: browser)
         guard download else {
             guard navigationResponse.isForMainFrame, PlainHTTP.needsWarning(response.url, in: browser) else { return .allow }
@@ -102,6 +105,19 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
             return .cancel
         }
         return await mayDownload(response.url, file: response.suggestedFilename, in: webView) ? .download : .cancel
+    }
+
+    private func isAttachment(_ response: URLResponse) -> Bool {
+        guard let http = response as? HTTPURLResponse, let disposition = http.value(forHTTPHeaderField: "Content-Disposition") else { return false }
+        return disposition.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("attachment")
+    }
+
+    /// HTML by its type, or with no type at all and a name WebKit gave it from what it read.
+    static func isWebPage(_ response: URLResponse) -> Bool {
+        let type = response.mimeType?.lowercased() ?? ""
+        if ["text/html", "application/xhtml+xml"].contains(type) { return true }
+        guard type.isEmpty, let name = response.suggestedFilename else { return false }
+        return ["html", "htm"].contains((name as NSString).pathExtension.lowercased())
     }
 
     /// Asked only of a site saving several files in a row (DownloadPermission). The site is the page's; a tab opened just for the

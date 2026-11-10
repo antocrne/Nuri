@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import CoreLocation
 import Network
 import os
 import OSLog
@@ -91,6 +92,7 @@ final class FeatureSelfTest {
             ("audit", { await $0.testAudit() }),
             ("certificat", { await $0.testExpiredCertificate() }),
             ("mineurs", { await $0.testMinorFixes() }),
+            ("retours", { await $0.testFeedback() }),
         ]
     }
 
@@ -3943,6 +3945,135 @@ extension FeatureSelfTest {
         check("Glisser un lien sur la barre d'onglets : un onglet par lien, le dernier affiché, rien pour javascript:", opened && browser.currentSpace.tabs.count == count + 2
               && tabs == ["depose-un.example", "depose-deux.example"] && browser.selectedTab?.url?.host() == "depose-deux.example", "\(tabs)")
         note("Glisser un lien sur la barre d'onglets : le vrai glisser-déposer n'est pas simulé (seule l'action qui suit l'est)")
+    }
+}
+
+// MARK: - Feedback of 2026-11-10
+
+extension FeatureSelfTest {
+    func testFeedback() async {
+        await feedbackWebPageNotDownloaded()
+        await feedbackGeolocation()
+        await feedbackInspectorLinks()
+        await feedbackWideTabs()
+    }
+
+    // YouTube's home page downloaded instead of shown.
+    private func feedbackWebPageNotDownloaded() async {
+        func response(_ type: String?, _ path: String) -> URLResponse {
+            URLResponse(url: URL(string: "https://www.youtube.com\(path)")!, mimeType: type, expectedContentLength: 10, textEncodingName: nil)
+        }
+        check("Page HTML : reconnue à son type, même quand WebKit la dit impossible à afficher",
+              TabWebDelegate.isWebPage(response("text/html", "/")) && TabWebDelegate.isWebPage(response("application/xhtml+xml", "/")))
+        check("Page HTML : un fichier d'un autre type reste un téléchargement",
+              !TabWebDelegate.isWebPage(response("application/pdf", "/a.pdf")) && !TabWebDelegate.isWebPage(response("application/octet-stream", "/")))
+    }
+
+    // leboncoin's « Autour de moi »: allowed, then waiting forever.
+    private func feedbackGeolocation() async {
+        MediaPermission.testLocationAnswer = .grant
+        Geolocation.shared.testPosition = CLLocation(coordinate: CLLocationCoordinate2D(latitude: 45.764, longitude: 4.8357), altitude: 170,
+                                                     horizontalAccuracy: 30, verticalAccuracy: 10, timestamp: Date())
+        defer {
+            MediaPermission.testLocationAnswer = nil
+            Geolocation.shared.testPosition = nil
+        }
+        let tab = await htmlTab("<title>Position</title>p")
+        let script = """
+            return await new Promise((resolve) => {
+              const timer = setTimeout(() => resolve("rien"), 4000);
+              navigator.geolocation.getCurrentPosition(
+                (p) => { clearTimeout(timer); resolve(p.coords.latitude.toFixed(3) + "," + p.coords.longitude.toFixed(3) + "," + Math.round(p.coords.accuracy) + "," + Math.round(p.coords.altitude)); },
+                (e) => { clearTimeout(timer); resolve("erreur " + e.code); });
+            });
+            """
+        let answer = await tab.webView?.nuriCall(script, world: .page, timeout: 6) as? String
+        check("Position : une page autorisée la reçoit (sans réponse, elle attendait pour toujours)", answer == "45.764,4.836,30,170", answer ?? "nil")
+        // A page keeps the answer it got: another one asks again.
+        MediaPermission.testLocationAnswer = .deny
+        let other = await htmlTab("<title>Position refusée</title>p", base: "https://autre-site.example/")
+        let refused = await other.webView?.nuriCall(script, world: .page, timeout: 6) as? String
+        check("Position : refusée, la page reçoit une erreur", refused == "erreur 1", refused ?? "nil")
+    }
+
+    // The inspector's « Ouvrir dans une nouvelle fenêtre » did nothing.
+    private func feedbackInspectorLinks() async {
+        let page = await htmlTab("<title>Inspectée</title>p")
+        guard let webView = page.webView else { check("Inspecteur : page", false); return }
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Ouvrir dans une nouvelle fenêtre", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Copier le lien", action: nil, keyEquivalent: "")
+        InspectorLinks.renameNewWindowItems(in: menu)
+        check("Inspecteur : l'élément dit « nouvel onglet »", menu.items.first?.title == L("Ouvrir dans un nouvel onglet", "Open in New Tab")
+              && menu.items.last?.title == "Copier le lien")
+
+        WebKitSPI.showInspector(webView, console: false)
+        let shown = await until(8) { WebKitSPI.inspectorWebView(webView) != nil }
+        check("Inspecteur : ouvert", shown)
+        guard shown, let inspectorView = WebKitSPI.inspectorWebView(webView) else { return }
+        await sleep(2)
+        // Through WebKit's own controller of the inspector, as its menu goes.
+        let controller = inspectorView.uiDelegate as? NSObject
+        let menuSelector = NSSelectorFromString("_webView:contextMenu:forElement:")
+        if let controller, controller.responds(to: menuSelector) {
+            let proposed = NSMenu()
+            proposed.addItem(withTitle: "Open in New Window", action: nil, keyEquivalent: "")
+            typealias Call = @convention(c) (AnyObject, Selector, AnyObject?, NSMenu, AnyObject?) -> NSMenu
+            let result = unsafeBitCast(controller.method(for: menuSelector), to: Call.self)(controller, menuSelector, inspectorView, proposed, nil)
+            check("Inspecteur : renommé dans le menu que WebKit montre", result.items.first?.title == L("Ouvrir dans un nouvel onglet", "Open in New Tab"),
+                  result.items.map(\.title).joined(separator: ", "))
+        } else {
+            check("Inspecteur : WebKit passe son menu par son contrôleur", false, String(describing: controller))
+        }
+
+        let target = URL(string: "https://lien-inspecteur.example/style.css")!
+        let open = NSSelectorFromString("_openURLExternallyForTesting:useFrontendAPI:")
+        guard let inspector = WebKitSPI.inspector(of: webView), inspector.responds(to: open) else {
+            check("Inspecteur : WebKit permet d'essayer un lien", false); return
+        }
+        let count = browser.currentSpace.tabs.count
+        typealias OpenCall = @convention(c) (AnyObject, Selector, NSURL, Bool) -> Void
+        unsafeBitCast(inspector.method(for: open), to: OpenCall.self)(inspector, open, target as NSURL, true)
+        let opened = await until(5) { browser.currentSpace.tabs.count == count + 1 }
+        let index = { (tab: Tab) in self.browser.currentSpace.tabs.firstIndex { $0 === tab } ?? -1 }
+        let new = browser.selectedTab
+        check("Inspecteur : « Ouvrir dans un nouvel onglet » ouvre un onglet de Nuri, à côté de la page, affiché",
+              opened && new !== page && new.map { index($0) == index(page) + 1 } == true
+              && (new?.url ?? new?.requestedURL)?.host() == target.host(), "\(String(describing: new?.url ?? new?.requestedURL))")
+        let close = NSSelectorFromString("close")
+        if inspector.responds(to: close) { inspector.perform(close) }
+    }
+
+    // Many tabs: the one under the pointer shown wide enough for its title.
+    private func feedbackWideTabs() async {
+        let titles = (1...34).map { "Onglet numéro \($0) avec un titre assez long" }
+        for title in titles {
+            let tab = browser.openTab(url: nil, background: true)
+            tab.title = title
+        }
+        browser.select(browser.currentSpace.tabs[0])
+        await sleep(0.8)
+        let tabs = browser.currentSpace.tabs
+        guard tabs.count > 20, let narrow = tabs.dropFirst(3).first, let frame = browser.tabFrames[narrow.id] else {
+            check("Onglets larges : la barre est pleine", false); return
+        }
+        check("Onglets larges : nombreux, ils n'ont plus la place de leur titre", frame.width < 90, "\(frame.width)")
+        // Mouse events made here don't reach SwiftUI's hover: shown wide the way the pointer does it.
+        note("Onglets larges : le survol lui-même (délai, enchaînement le long de la barre) n'est pas simulé")
+        browser.expandsWithoutPointer = true
+        defer { browser.expandsWithoutPointer = false; browser.expandedTabID = nil }
+        browser.expandedTabID = narrow.id
+        await sleep(0.3)
+        let after = browser.tabFrames[narrow.id]
+        check("Onglets larges : agrandi, la barre ne bouge pas sous le pointeur", after.map { abs($0.minX - frame.minX) < 1 && abs($0.width - frame.width) < 1 } == true)
+        await snapshot("onglet-agrandi")
+        // The last one on screen grows to the left, inside the bar.
+        let windowWidth = browser.window?.contentView?.bounds.width ?? 0
+        if let last = tabs.last(where: { (browser.tabFrames[$0.id]?.maxX ?? .infinity) < windowWidth - 200 }) {
+            browser.expandedTabID = last.id
+                await snapshot("onglet-agrandi-dernier")
+        }
+        browser.expandedTabID = nil
     }
 }
 #endif
