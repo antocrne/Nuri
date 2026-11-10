@@ -104,14 +104,8 @@ final class BrowserModel {
     var porthole: Tab?
     /// The tab under the pointer while being dragged.
     var carry: TabCarry?
-    /// A narrow tab under the pointer, shown wide enough for its title over its neighbours.
+    /// The tab under the pointer. With many tabs it widens in the bar, its neighbours making room.
     var expandedTabID: UUID?
-    /// When the last one went: the next tab passed over is shown wide at once.
-    @ObservationIgnored var expandedTabLeftAt = Date.distantPast
-    #if DEBUG
-    /// Self-tests in the background, where no pointer reaches the bar: shown wide all the same.
-    @ObservationIgnored var expandsWithoutPointer = false
-    #endif
     @ObservationIgnored let carryPointer = CarryPointer()
     /// Bumped to give the new tab page's field the focus.
     var newTabFieldFocus = 0

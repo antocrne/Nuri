@@ -4046,7 +4046,8 @@ extension FeatureSelfTest {
 
     // Many tabs: the one under the pointer shown wide enough for its title.
     private func feedbackWideTabs() async {
-        let titles = (1...34).map { "Onglet numéro \($0) avec un titre assez long" }
+        // A few past 12: narrow, but not yet down to their icon (then the others have room to give).
+        let titles = (1...13).map { "Onglet numéro \($0) avec un titre assez long" }
         for title in titles {
             let tab = browser.openTab(url: nil, background: true)
             tab.title = title
@@ -4054,24 +4055,42 @@ extension FeatureSelfTest {
         browser.select(browser.currentSpace.tabs[0])
         await sleep(0.8)
         let tabs = browser.currentSpace.tabs
-        guard tabs.count > 20, let narrow = tabs.dropFirst(3).first, let frame = browser.tabFrames[narrow.id] else {
+        guard tabs.count >= TabStrip.growsFrom, let narrow = tabs.dropFirst(3).first, let frame = browser.tabFrames[narrow.id] else {
             check("Onglets larges : la barre est pleine", false); return
         }
         check("Onglets larges : nombreux, ils n'ont plus la place de leur titre", frame.width < 90, "\(frame.width)")
-        // Mouse events made here don't reach SwiftUI's hover: shown wide the way the pointer does it.
-        note("Onglets larges : le survol lui-même (délai, enchaînement le long de la barre) n'est pas simulé")
-        browser.expandsWithoutPointer = true
-        defer { browser.expandsWithoutPointer = false; browser.expandedTabID = nil }
+        // Mouse events made here don't reach SwiftUI's hover: the tab under the pointer set as it does.
+        note("Onglets larges : le passage de la souris lui-même n'est pas simulé")
+        defer { browser.expandedTabID = nil }
+        let neighbour = tabs[4]
+        let neighbourBefore = browser.tabFrames[neighbour.id]?.width ?? 0
+        let activeBefore = browser.selectedTab.flatMap { browser.tabFrames[$0.id]?.width } ?? 0
         browser.expandedTabID = narrow.id
-        await sleep(0.3)
+        await sleep(0.5)
         let after = browser.tabFrames[narrow.id]
-        check("Onglets larges : agrandi, la barre ne bouge pas sous le pointeur", after.map { abs($0.minX - frame.minX) < 1 && abs($0.width - frame.width) < 1 } == true)
+        check("Onglets larges : survolé, il s'élargit dans la barre jusqu'à son titre",
+              after.map { $0.width >= TabChip.fittingWidth(narrow) - 1 && $0.width > frame.width + 40 } == true, "\(String(describing: after?.width))")
+        let neighbourAfter = browser.tabFrames[neighbour.id]?.width ?? 0
+        let activeAfter = browser.selectedTab.flatMap { browser.tabFrames[$0.id]?.width } ?? 0
+        check("Onglets larges : les autres se resserrent, l'onglet actif garde sa largeur",
+              neighbourAfter < neighbourBefore - 0.5 && abs(activeAfter - activeBefore) < 1, "\(neighbourBefore) → \(neighbourAfter), actif \(activeBefore) → \(activeAfter)")
+        // It grows from where it was: the pointer that was over it still is.
+        check("Onglets larges : il reste sous le pointeur", after.map { $0.minX <= frame.midX && $0.maxX >= frame.midX } == true)
         await snapshot("onglet-agrandi")
-        // The last one on screen grows to the left, inside the bar.
-        let windowWidth = browser.window?.contentView?.bounds.width ?? 0
-        if let last = tabs.last(where: { (browser.tabFrames[$0.id]?.maxX ?? .infinity) < windowWidth - 200 }) {
-            browser.expandedTabID = last.id
-                await snapshot("onglet-agrandi-dernier")
+        browser.expandedTabID = nil
+        await sleep(0.5)
+        check("Onglets larges : le pointeur parti, tout reprend sa place",
+              browser.tabFrames[narrow.id].map { abs($0.width - frame.width) < 1 } == true)
+        // Below 12 tabs, nothing moves.
+        for tab in tabs.dropFirst(TabStrip.growsFrom - 1) where tab !== browser.selectedTab { browser.close(tab) }
+        await sleep(0.6)
+        let few = browser.currentSpace.tabs
+        if few.count < TabStrip.growsFrom, let some = few.first(where: { $0 !== browser.selectedTab }), let before = browser.tabFrames[some.id] {
+            browser.expandedTabID = some.id
+            await sleep(0.4)
+            check("Onglets larges : moins de 12 onglets, rien ne bouge", browser.tabFrames[some.id].map { abs($0.width - before.width) < 1 } == true)
+        } else {
+            check("Onglets larges : moins de 12 onglets", false, "\(few.count)")
         }
         browser.expandedTabID = nil
     }
