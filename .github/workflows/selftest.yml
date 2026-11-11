@@ -10,14 +10,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Auto-tests
         env:
           NURI_SELFTEST_ADHOC: "1"
         run: scripts/selftest.sh "" "$RUNNER_TEMP/rapport.md"
       - name: Rapport
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rapport-auto-tests
           path: ${{ runner.temp }}/rapport*
