@@ -201,6 +201,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         firstClick = nil
         guard hypot(point.x - click.point.x, point.y - click.point.y) < 4, browser.carry == nil else { return }
         DispatchQueue.main.async { [browser] in
+            browser.traceClick("après relâche : visé \(click.tab?.title ?? "rien"), ouvert \(browser.selectedTab?.title ?? "aucun"), barre \(browser.commandBar != nil)")
             if let tab = click.tab, !tab.isClosed {
                 if browser.selectedTab !== tab, browser.commandBar == nil {
                     browser.select(tab)

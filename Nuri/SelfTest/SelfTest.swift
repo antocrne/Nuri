@@ -1175,11 +1175,12 @@ final class FeatureSelfTest {
 
         // The same click on another tab: it opens, and its address isn't being edited.
         let third = await htmlTab("<title>Troisième</title>c", title: "Troisième")
+        browser.clickTrace = []
         browser.select(other)
         await sleep(0.4)
         if let center = center(of: third) {
+            browser.traceClick("avant le clic : ouvert \(browser.selectedTab?.title ?? "aucun"), autre « \(other.title) » fermé \(other.isClosed), cadres \(browser.currentSpace.tabs.map { "\($0.title) \(Int(browser.tabFrames[$0.id]?.minX ?? -1))-\(Int(browser.tabFrames[$0.id]?.maxX ?? -1))" })")
             browser.window?.delegate?.windowDidBecomeKey?(Notification(name: NSWindow.didBecomeKeyNotification, object: browser.window))
-            browser.clickTrace = []
             await mouse(.leftMouseDown, at: center, post: true)
             await mouse(.leftMouseUp, at: center, post: true)
             await sleep(0.3)

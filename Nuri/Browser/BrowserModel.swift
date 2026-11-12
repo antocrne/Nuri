@@ -260,6 +260,7 @@ final class BrowserModel {
         guard !tab.isClosed, let space = tab.space, space.allTabs.contains(where: { $0 === tab }) else { return }
         let previous = selectedTab
         let shownBefore = visibleTabs
+        traceClick("choix \(previous?.title ?? "aucun") → \(tab.title) ← " + Thread.callStackSymbols.dropFirst(2).prefix(3).compactMap { $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).first.map { String($0.prefix(70)) } }.joined(separator: " < "))
         if let glance = porthole, glance !== tab { closePorthole() }
         if space.id != currentSpaceID { currentSpaceID = space.id }
         withAnimation(Theme.quick) { space.selectedTabID = tab.id }
