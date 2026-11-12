@@ -542,6 +542,7 @@ extension BrowserModel {
             if hypot(translation.width, translation.height) < Self.dragThreshold {
                 // The same click may have opened it a moment ago (a window's first click, acted on
                 // before this release on a slow Mac): it asked for the tab, not for its address.
+                traceClick("relâché sur \(tab.title), ouvert \(selectedTab === tab), premier clic \(openedByFirstClick != nil)")
                 let justOpened = openedByFirstClick.map { $0.id == tab.id && $0.at.timeIntervalSinceNow > -0.5 } ?? false
                 openedByFirstClick = nil
                 if selectedTab !== tab { select(tab) } else if !justOpened { showCommandBar(.currentTab) }

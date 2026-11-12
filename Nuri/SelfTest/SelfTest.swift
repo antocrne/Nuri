@@ -1179,11 +1179,13 @@ final class FeatureSelfTest {
         await sleep(0.4)
         if let center = center(of: third) {
             browser.window?.delegate?.windowDidBecomeKey?(Notification(name: NSWindow.didBecomeKeyNotification, object: browser.window))
+            browser.clickTrace = []
             await mouse(.leftMouseDown, at: center, post: true)
             await mouse(.leftMouseUp, at: center, post: true)
             await sleep(0.3)
             check("Focus : premier clic sur un autre onglet, il s'ouvre", browser.selectedTab === third)
-            check("Focus : premier clic sur un autre onglet, sans éditer l'adresse", browser.commandBar == nil)
+            check("Focus : premier clic sur un autre onglet, sans éditer l'adresse", browser.commandBar == nil,
+                  browser.commandBar == nil ? "" : browser.clickTrace.joined(separator: " | "))
             browser.commandBar = nil
         }
 

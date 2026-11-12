@@ -186,6 +186,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     /// the tab or the button, should it have received the click after all, comes first.
     private func firstClickEvent(_ event: NSEvent) {
         let point = topLeftLocation(event)
+        browser.traceClick("fenêtre \(event.type == .leftMouseDown ? "appui" : "relâche") \(point), clé \(window?.isKeyWindow == true)")
         if event.type == .leftMouseDown {
             let isFirst = window?.isKeyWindow != true || event.timestamp - becameKeyAt < 0.3
             guard isFirst, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else {
@@ -204,6 +205,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
                 if browser.selectedTab !== tab, browser.commandBar == nil {
                     browser.select(tab)
                     browser.openedByFirstClick = (tab.id, Date())
+                    browser.traceClick("premier clic ouvre \(tab.title)")
                 }
             } else if click.onNewTab, browser.commandBar == nil {
                 browser.showCommandBar(.newTab)
