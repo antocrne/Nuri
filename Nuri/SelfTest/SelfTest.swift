@@ -137,7 +137,7 @@ final class FeatureSelfTest {
         // Events made by hand get lost when another app is in front: that says nothing of Nuri.
         if !condition, !eventsWereInFront {
             unverified += 1
-            lines.append("- ⚪️ NON VÉRIFIÉ (Nuri pas au premier plan) : \(name)")
+            lines.append("- ⚪️ NON VÉRIFIÉ (Nuri pas au premier plan, ou machine trop lente) : \(name)")
             return
         }
         if condition { passed += 1 } else { failed += 1 }
@@ -1893,10 +1893,16 @@ final class FeatureSelfTest {
             browser.commandBar = nil
             // Longer than the fade: on a slow runner it starts late, and the last value must be the end.
             let leaving = await brightnessOverTime(1)
-            check("Voile (\(name)) : s'en va en douceur", leaving.contains { $0 < clear - 0.005 && $0 > dimmed + 0.005 },
-                  leaving.map { String(format: "%.3f", $0) }.joined(separator: " "))
-            check("Voile (\(name)) : ne laisse aucune trace", abs((leaving.last ?? 0) - clear) < 0.005,
-                  String(format: "%.3f → %.3f", clear, leaving.last ?? 0))
+            // A machine reading the window fewer than 25 times a second can miss the whole fade
+            // between two readings (GitHub's runners: 4 to 15 a second): nothing to conclude then.
+            let gone = leaving.contains { $0 < clear - 0.005 && $0 > dimmed + 0.005 }
+            if !gone, leaving.count < 25 { eventsWereInFront = false }
+            check("Voile (\(name)) : s'en va en douceur", gone, leaving.map { String(format: "%.3f", $0) }.joined(separator: " "))
+            eventsWereInFront = true
+            // However late the fade started, it ends.
+            _ = await until(3) { abs((self.chromeBrightness() ?? 0) - clear) < 0.005 }
+            let after = chromeBrightness() ?? 0
+            check("Voile (\(name)) : ne laisse aucune trace", abs(after - clear) < 0.005, String(format: "%.3f → %.3f", clear, after))
             var alpha: CGFloat = 0
             NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
                 alpha = NSColor(Theme.commandBarCard).usingColorSpace(.sRGB)?.alphaComponent ?? 0
@@ -2524,7 +2530,12 @@ final class FeatureSelfTest {
 
     private func testUpdater() async {
         check("Mises à jour : comparaison de versions", Updater.isNewer("0.1.1", than: "0.1.0") && !Updater.isNewer("0.1.0", than: "0.1") && Updater.isNewer("1.0", than: "0.9.9"))
-        check("Mises à jour : on vérifie les archives par la signature", Updater.teamIdentifier() != nil, Updater.teamIdentifier() ?? "nil")
+        // Signed ad hoc (GitHub's runners, scripts/selftest.sh): no team, and Nuri must say so.
+        if ProcessInfo.processInfo.environment["NURI_SELFTEST_ADHOC"] != nil {
+            check("Mises à jour : signé sans équipe, aucune équipe n'est lue", Updater.teamIdentifier() == nil, Updater.teamIdentifier() ?? "nil")
+        } else {
+            check("Mises à jour : on vérifie les archives par la signature", Updater.teamIdentifier() != nil, Updater.teamIdentifier() ?? "nil")
+        }
         do {
             _ = try await Updater.newestRelease()
             note("Mises à jour : le dépôt \(Updater.repository) répond")
@@ -3419,7 +3430,10 @@ extension FeatureSelfTest {
         await mouse(.mouseMoved, at: CGPoint(x: frame.minX + 70, y: frame.minY + 60))
         await mouse(.mouseMoved, at: CGPoint(x: frame.minX + 80, y: frame.minY + 62))
         let real = await until(3) { tab.hoveredLink == link }
+        // WebKit asks the window server where the pointer is: a runner's isn't over the link.
+        if !real, ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] != nil { eventsWereInFront = false }
         check("Survol : avec un vrai mouvement du pointeur sur la page", real, tab.hoveredLink?.absoluteString ?? "rien")
+        eventsWereInFront = true
         tab.webView?.loadHTMLString("<p>autre</p>", baseURL: URL(string: "https://nuri-selftest.example/autre"))
         await waitForLoad(tab)
         check("Survol : une nouvelle page efface le lien", tab.hoveredLink == nil)

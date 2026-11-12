@@ -201,7 +201,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         guard hypot(point.x - click.point.x, point.y - click.point.y) < 4, browser.carry == nil else { return }
         DispatchQueue.main.async { [browser] in
             if let tab = click.tab, !tab.isClosed {
-                if browser.selectedTab !== tab, browser.commandBar == nil { browser.select(tab) }
+                if browser.selectedTab !== tab, browser.commandBar == nil {
+                    browser.select(tab)
+                    browser.openedByFirstClick = (tab.id, Date())
+                }
             } else if click.onNewTab, browser.commandBar == nil {
                 browser.showCommandBar(.newTab)
             }

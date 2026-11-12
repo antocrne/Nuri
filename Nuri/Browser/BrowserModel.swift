@@ -104,6 +104,9 @@ final class BrowserModel {
     var porthole: Tab?
     /// The tab under the pointer while being dragged.
     var carry: TabCarry?
+    /// The tab a window's first click has just opened (BrowserWindowController), and when: its own
+    /// release, should it come after, must not take it for a click on the tab already open.
+    @ObservationIgnored var openedByFirstClick: (id: UUID, at: Date)?
     /// The tab under the pointer. With many tabs it widens in the bar, its neighbours making room.
     var expandedTabID: UUID?
     @ObservationIgnored let carryPointer = CarryPointer()
