@@ -2312,7 +2312,8 @@ final class FeatureSelfTest {
         let base = "http://localhost:\(server.port)"
         let page = browser.openTab(url: URL(string: "\(base)/long"))
         await waitForLoad(page)
-        func inPage(_ code: String) async -> Any? { try? await page.webView?.callAsyncJavaScript(code, contentWorld: .page) }
+        // With a limit: a page held by a print panel that never leaves must not hold the tests.
+        func inPage(_ code: String) async -> Any? { await page.webView?.nuriCall(code, world: .page, timeout: 10) }
         browser.select(page)
 
         // Windows. A script called by Nuri counts as a click, as long as it runs at once.
@@ -2366,6 +2367,13 @@ final class FeatureSelfTest {
         }
         if let content = sheet?.contentView { _ = cancel(content) }
         await sleep(0.8)
+        // A slow machine shows the panel late, or keeps it a while (a GitHub runner stayed on it for
+        // good): whatever is still there is cancelled, and the tests go on.
+        for _ in 0..<20 {
+            guard let late = browser.window?.attachedSheet else { break }
+            if let content = late.contentView, !cancel(content) { browser.window?.endSheet(late, returnCode: .cancel) }
+            await sleep(0.5)
+        }
         check("Permissions : la page reprend une fois le panneau fermé", await inPage("return window.nuriPrinted === true") as? Bool == true)
 
         // Notifications: the question.
