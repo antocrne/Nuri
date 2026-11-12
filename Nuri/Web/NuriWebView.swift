@@ -234,6 +234,8 @@ final class NuriWebView: WKWebView {
         "WKMenuItemIdentifierReload": "arrow.clockwise",
         "WKMenuItemIdentifierInspectElement": "hammer",
         "WKMenuItemIdentifierSpeechMenu": "waveform",
+        // Recent macOS give it a picture of their own; macOS 15 gives none.
+        "WKMenuItemIdentifierShareMenu": "square.and.arrow.up",
         "WKMenuItemIdentifierToggleFullScreen": "arrow.up.left.and.arrow.down.right",
         "WKMenuItemIdentifierShowHideMediaControls": "slider.horizontal.below.rectangle",
     ]

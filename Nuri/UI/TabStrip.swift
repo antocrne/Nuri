@@ -20,7 +20,8 @@ struct TabStrip: View {
     private static let blockInset: CGFloat = 2
     /// From this many tabs in the bar, the one under the pointer widens.
     static let growsFrom = 12
-    private static let growth = Animation.spring(response: 0.22, dampingFraction: 0.9)
+    /// Slow and without any bounce: the whole bar moves with it, and it starts at every tab the pointer crosses.
+    private static let growth = Animation.smooth(duration: 0.75)
 
     private struct Entry: Identifiable {
         let tab: Tab

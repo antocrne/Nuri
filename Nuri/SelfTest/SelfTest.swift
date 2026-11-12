@@ -196,13 +196,43 @@ final class FeatureSelfTest {
                   "\(topLeft) · onglets \(browser.currentSpace.tabs.map { "\($0.title) \(browser.tabFrames[$0.id] ?? .zero)" }) · porté \(String(describing: browser.carry))")
             return
         }
+        // A text field follows the mouse until it's released: a press sent straight to it would wait
+        // here for a release still to come (GitHub's runners, their window smaller, hung on it).
+        // That press and its release go through the queue instead.
+        if type == .leftMouseDown, !post, let hit = window.contentView?.hitTest(windowPoint(topLeft)),
+           hit is NSText || hit is NSTextField || hit.superview is NSTextField {
+            queuesUntilRelease = true
+        }
+        let queued = post || queuesUntilRelease
+        if type == .leftMouseUp { queuesUntilRelease = false }
         var final = event
         if let button, let quartz = event.cgEvent {
             quartz.setIntegerValueField(.mouseEventButtonNumber, value: button)
             final = NSEvent(cgEvent: quartz) ?? event
         }
-        if post { NSApp.postEvent(final, atStart: false) } else { window.sendEvent(final) }
+        if queued { NSApp.postEvent(final, atStart: false) } else { window.sendEvent(final) }
         await sleep(0.07)
+    }
+
+    private var queuesUntilRelease = false
+
+    /// A local port nothing listens on: a load there fails at once, refused, whatever WebKit's
+    /// version thinks of the port itself.
+    private func closedPort() -> Int {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return 1 }
+        defer { close(fd) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, length) == 0 && getsockname(fd, $0, &length) == 0
+            }
+        }
+        return bound ? Int(UInt16(bigEndian: address.sin_port)) : 1
     }
 
     private func center(of tab: Tab) -> CGPoint? {
@@ -309,13 +339,15 @@ final class FeatureSelfTest {
         try? FileManager.default.removeItem(at: saved)
 
         // ⌘R on a load that failed.
-        let failing = browser.openTab(url: URL(string: "http://127.0.0.1:9/"))
+        // A refused connection: port 9, refused by WebKit itself, didn't fail on macOS 15.
+        let failing = browser.openTab(url: URL(string: "http://127.0.0.1:\(closedPort())/"))
         await waitForLoad(failing)
-        let failedFirst = failing.loadError != nil
+        let firstError = failing.loadError
         browser.select(failing)
         browser.reload()
         await waitForLoad(failing)
-        check("Session : ⌘R après un échec redemande la page", failedFirst && failing.loadError != nil && failing.url != nil, failing.loadError ?? "aucune erreur")
+        check("Session : ⌘R après un échec redemande la page", firstError != nil && failing.loadError != nil && failing.url != nil,
+              "\(firstError ?? "pas d'échec au départ") → \(failing.loadError ?? "aucune erreur")")
 
         // Text typed and not sent.
         let typed = await htmlTab("<title>T</title><form><input id=f name=f><input type=search id=s><input type=password id=p></form>")
@@ -1859,7 +1891,8 @@ final class FeatureSelfTest {
                   coming.map { String(format: "%.3f", $0) }.joined(separator: " "))
             await snapshot("barre-voile-\(name)")
             browser.commandBar = nil
-            let leaving = await brightnessOverTime(0.3)
+            // Longer than the fade: on a slow runner it starts late, and the last value must be the end.
+            let leaving = await brightnessOverTime(1)
             check("Voile (\(name)) : s'en va en douceur", leaving.contains { $0 < clear - 0.005 && $0 > dimmed + 0.005 },
                   leaving.map { String(format: "%.3f", $0) }.joined(separator: " "))
             check("Voile (\(name)) : ne laisse aucune trace", abs((leaving.last ?? 0) - clear) < 0.005,
@@ -3967,6 +4000,8 @@ extension FeatureSelfTest {
               TabWebDelegate.isWebPage(response("text/html", "/")) && TabWebDelegate.isWebPage(response("application/xhtml+xml", "/")))
         check("Page HTML : un fichier d'un autre type reste un téléchargement",
               !TabWebDelegate.isWebPage(response("application/pdf", "/a.pdf")) && !TabWebDelegate.isWebPage(response("application/octet-stream", "/")))
+        check("Page : une réponse sans adresse (perdue par WebKit) est reconnue, une vraie non",
+              TabWebDelegate.isLostResponse(URLResponse()) && !TabWebDelegate.isLostResponse(response("application/pdf", "/a.pdf")))
     }
 
     // leboncoin's « Autour de moi »: allowed, then waiting forever.
