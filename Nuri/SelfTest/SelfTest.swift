@@ -4000,6 +4000,8 @@ extension FeatureSelfTest {
               TabWebDelegate.isWebPage(response("text/html", "/")) && TabWebDelegate.isWebPage(response("application/xhtml+xml", "/")))
         check("Page HTML : un fichier d'un autre type reste un téléchargement",
               !TabWebDelegate.isWebPage(response("application/pdf", "/a.pdf")) && !TabWebDelegate.isWebPage(response("application/octet-stream", "/")))
+        check("Page : une réponse sans adresse (perdue par WebKit) est reconnue, une vraie non",
+              TabWebDelegate.isLostResponse(URLResponse()) && !TabWebDelegate.isLostResponse(response("application/pdf", "/a.pdf")))
     }
 
     // leboncoin's « Autour de moi »: allowed, then waiting forever.

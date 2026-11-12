@@ -282,12 +282,24 @@ struct TitleBarDragArea: NSViewRepresentable {
                 }
                 return
             }
-            // The pointer keeps its place in the window while the window follows it.
-            let grab = event.locationInWindow
-            while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]), next.type == .leftMouseDragged {
-                let pointer = window.convertPoint(toScreen: next.locationInWindow)
-                window.setFrameOrigin(NSPoint(x: pointer.x - grab.x, y: pointer.y - grab.y))
+            // macOS moves the window itself: only its own drag knows the screen's edges and corners
+            // (the window tiled on a half or a quarter of the screen), Spaces and Mission Control.
+            // A window moved by hand with setFrameOrigin got none of that. It is movable for the
+            // time of this drag only: at rest, tabs must still never move it.
+            window.isMovable = true
+            window.performDrag(with: event)
+            Self.lockWhenReleased(window)
+        }
+
+        /// `performDrag` may come back before the button is up: the window stays movable until then.
+        private static func lockWhenReleased(_ window: NSWindow) {
+            guard NSEvent.pressedMouseButtons & 1 != 0 else { window.isMovable = false; return }
+            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak window] timer in
+                guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
+                timer.invalidate()
+                MainActor.assumeIsolated { window?.isMovable = false }
             }
+            RunLoop.main.add(timer, forMode: .common)
         }
     }
 }

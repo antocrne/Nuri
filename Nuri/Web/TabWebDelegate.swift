@@ -90,13 +90,27 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         // where a PDF or an image would otherwise be shown to nobody.
         var download = !navigationResponse.canShowMIMEType || isAttachment(navigationResponse.response)
         let response = navigationResponse.response
-        // A web page WebKit says it can't show: never true of HTML, yet it happened with YouTube typed
-        // in the address bar, and its home page landed in Téléchargements ("www.youtube.com.html", no
-        // address kept). WebKit shows it when let through (it reads what it gets), so it is.
-        if download, !navigationResponse.canShowMIMEType, navigationResponse.isForMainFrame, !isAttachment(response),
-           Self.isWebPage(response) {
-            Log.downloads.error("Page HTML donnée comme impossible à afficher (type « \(response.mimeType ?? "aucun", privacy: .public) », adresse \(response.url == nil ? "absente" : "présente", privacy: .public)) : affichée")
-            download = false
+        if download, !navigationResponse.canShowMIMEType, navigationResponse.isForMainFrame, !isAttachment(response) {
+            if Self.isLostResponse(response) {
+                // A WebKit bug, seen with YouTube typed in a new tab (journal of 2026-11-12): the first
+                // visit after launch finds the site's service worker asleep, WebKit asks the network
+                // itself meanwhile, hands that answer to the page's process, then moves the page to a
+                // new process (Cross-Origin-Opener-Policy) which gets an empty answer: no address, no
+                // type. Said "can't be shown", it used to land in Téléchargements as
+                // "www.youtube.com.html". Asked again, the worker is awake and the page comes normally.
+                if let target = webView.url ?? tab?.url, ["http", "https"].contains(target.scheme?.lowercased() ?? ""), mayRetryLostResponse() {
+                    Log.downloads.error("Réponse vide de WebKit pour la page (changement de processus) : page redemandée")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak webView] in webView?.nuriLoad(target) }
+                    return .cancel
+                }
+                // Still empty after two tries: shown as it comes, never saved as a file nobody asked for.
+                Log.downloads.error("Réponse vide de WebKit pour la page, encore : laissée à l'affichage")
+                download = false
+            } else if Self.isWebPage(response) {
+                // HTML that WebKit says it can't show: it reads what it gets, so it is shown.
+                Log.downloads.error("Page HTML donnée comme impossible à afficher (type « \(response.mimeType ?? "aucun", privacy: .public) ») : affichée")
+                download = false
+            }
         }
         StrictTransport.record(response, in: browser)
         guard download else {
@@ -110,6 +124,18 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     private func isAttachment(_ response: URLResponse) -> Bool {
         guard let http = response as? HTTPURLResponse, let disposition = http.value(forHTTPHeaderField: "Content-Disposition") else { return false }
         return disposition.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("attachment")
+    }
+
+    /// The answer of a page always has an address: one without is an answer WebKit lost on the way.
+    static func isLostResponse(_ response: URLResponse) -> Bool { response.url == nil }
+
+    /// Two tries in a quarter of a minute, so that a page always answered empty can't loop.
+    private var lostResponseRetries: [Date] = []
+    private func mayRetryLostResponse() -> Bool {
+        lostResponseRetries.removeAll { $0.timeIntervalSinceNow < -15 }
+        guard lostResponseRetries.count < 2 else { return false }
+        lostResponseRetries.append(Date())
+        return true
     }
 
     /// HTML by its type, or with no type at all and a name WebKit gave it from what it read.
