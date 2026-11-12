@@ -186,6 +186,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     /// the tab or the button, should it have received the click after all, comes first.
     private func firstClickEvent(_ event: NSEvent) {
         let point = topLeftLocation(event)
+        browser.traceClick("fenêtre \(event.type == .leftMouseDown ? "appui" : "relâche") \(point), clé \(window?.isKeyWindow == true)")
         if event.type == .leftMouseDown {
             let isFirst = window?.isKeyWindow != true || event.timestamp - becameKeyAt < 0.3
             guard isFirst, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else {
@@ -200,8 +201,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         firstClick = nil
         guard hypot(point.x - click.point.x, point.y - click.point.y) < 4, browser.carry == nil else { return }
         DispatchQueue.main.async { [browser] in
+            browser.traceClick("après relâche : visé \(click.tab?.title ?? "rien"), ouvert \(browser.selectedTab?.title ?? "aucun"), barre \(browser.commandBar != nil)")
             if let tab = click.tab, !tab.isClosed {
-                if browser.selectedTab !== tab, browser.commandBar == nil { browser.select(tab) }
+                if browser.selectedTab !== tab, browser.commandBar == nil {
+                    // Before, not after: opening a tab can let the click's own release in (seen on a slow Mac).
+                    browser.openedByFirstClick = (tab.id, Date())
+                    browser.select(tab)
+                    browser.traceClick("premier clic ouvre \(tab.title)")
+                }
             } else if click.onNewTab, browser.commandBar == nil {
                 browser.showCommandBar(.newTab)
             }

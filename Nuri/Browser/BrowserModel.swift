@@ -104,6 +104,16 @@ final class BrowserModel {
     var porthole: Tab?
     /// The tab under the pointer while being dragged.
     var carry: TabCarry?
+    /// The tab a window's first click has just opened (BrowserWindowController), and when: its own
+    /// release, should it come after, must not take it for a click on the tab already open.
+    @ObservationIgnored var openedByFirstClick: (id: UUID, at: Date)?
+    /// Self-tests only: who did what with a click, for a failure seen on one machine and not another.
+    @ObservationIgnored var clickTrace: [String] = []
+    func traceClick(_ what: @autoclosure () -> String) {
+        guard SelfTestRunner.isRequested else { return }
+        clickTrace.append(String(format: "%.3f ", Date().timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100)) + what())
+        if clickTrace.count > 40 { clickTrace.removeFirst() }
+    }
     /// The tab under the pointer. With many tabs it widens in the bar, its neighbours making room.
     var expandedTabID: UUID?
     @ObservationIgnored let carryPointer = CarryPointer()
@@ -250,6 +260,7 @@ final class BrowserModel {
         guard !tab.isClosed, let space = tab.space, space.allTabs.contains(where: { $0 === tab }) else { return }
         let previous = selectedTab
         let shownBefore = visibleTabs
+        traceClick("choix \(previous?.title ?? "aucun") → \(tab.title) ← " + Thread.callStackSymbols.dropFirst(2).prefix(3).compactMap { $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).first.map { String($0.prefix(70)) } }.joined(separator: " < "))
         if let glance = porthole, glance !== tab { closePorthole() }
         if space.id != currentSpaceID { currentSpaceID = space.id }
         withAnimation(Theme.quick) { space.selectedTabID = tab.id }
@@ -474,6 +485,7 @@ final class BrowserModel {
     // MARK: - Navigation
 
     func showCommandBar(_ mode: CommandBarMode) {
+        traceClick("barre \(mode) ← " + Thread.callStackSymbols.dropFirst(2).prefix(4).compactMap { $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).first.map(String.init) }.joined(separator: " < "))
         // The new tab page has its own field: no second one over it.
         guard selectedTab != nil else {
             commandBar = nil
