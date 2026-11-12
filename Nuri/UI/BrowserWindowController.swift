@@ -204,8 +204,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             browser.traceClick("après relâche : visé \(click.tab?.title ?? "rien"), ouvert \(browser.selectedTab?.title ?? "aucun"), barre \(browser.commandBar != nil)")
             if let tab = click.tab, !tab.isClosed {
                 if browser.selectedTab !== tab, browser.commandBar == nil {
-                    browser.select(tab)
+                    // Before, not after: opening a tab can let the click's own release in (seen on a slow Mac).
                     browser.openedByFirstClick = (tab.id, Date())
+                    browser.select(tab)
                     browser.traceClick("premier clic ouvre \(tab.title)")
                 }
             } else if click.onNewTab, browser.commandBar == nil {
