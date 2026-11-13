@@ -72,7 +72,7 @@ struct Shortcut: Equatable, Codable {
 /// Everything shortcuts can do. Menus and Settings → Shortcuts are both built from this list.
 enum NuriCommand: String, CaseIterable, Identifiable {
     case newTab, newWindow, newPrivateWindow, address, closeTab, closeWindow, closeAllTabs, reopenTab
-    case nextTab, previousTab, newFolder, muteTab
+    case nextTab, previousTab, tabList, newFolder, muteTab
     case back, forward, reload, reloadHard, stop, copyAddress, printPage, savePage, openFile
     case find, findNext, findPrevious, zoomIn, zoomOut, zoomReset
     case reader, pip, split, swapSides, focusOtherSide, toggleBar, fullScreen
@@ -95,6 +95,7 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .reopenTab: Shortcut("t", "cs")
         case .nextTab: Shortcut("\t", "k")
         case .previousTab: Shortcut("\t", "ks")
+        case .tabList: Shortcut("a", "cs")
         case .newFolder: Shortcut("n", "ck")
         case .muteTab: Shortcut("m", "k")
         case .back: Shortcut("[", "c")
@@ -153,6 +154,7 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .reopenTab: L("Rouvrir l'onglet fermé", "Reopen Closed Tab")
         case .nextTab: L("Onglet suivant", "Next Tab")
         case .previousTab: L("Onglet précédent", "Previous Tab")
+        case .tabList: L("Tous les onglets", "All Tabs")
         case .newFolder: L("Nouveau dossier", "New Folder")
         case .muteTab: L("Couper ou remettre le son de l'onglet", "Mute or Unmute Tab")
         case .back: L("Précédent", "Back")
@@ -215,6 +217,7 @@ enum NuriCommand: String, CaseIterable, Identifiable {
         case .reopenTab: browser.reopenClosedTab()
         case .nextTab: browser.selectAdjacentTab(1)
         case .previousTab: browser.selectAdjacentTab(-1)
+        case .tabList: browser.showingTabList.toggle()
         case .newFolder: browser.addFolder()
         case .muteTab: browser.toggleMute()
         case .back: browser.goBack()
@@ -310,7 +313,7 @@ final class NuriMenu: NSObject {
         main.addItem(submenu(L("Présentation", "View"), items([.reload, .reloadHard, .stop, nil, .find, .findNext, .findPrevious, nil, .zoomIn, .zoomOut, .zoomReset, nil, .reader, .pip, nil, .toggleBar, .fullScreen, nil, .viewSource, .inspector, .console])))
         main.addItem(submenu(L("Navigation", "Go"), items([.back, .forward, nil, .copyAddress, nil, .history, .downloads, nil, .blockerForSite])))
         main.addItem(submenu(L("Signets", "Bookmarks"), items([.bookmark, .bookmarks])))
-        main.addItem(submenu(L("Onglets", "Tabs"), items([.nextTab, .previousTab, nil, .split, .swapSides, .focusOtherSide, nil, .muteTab, .newFolder, nil, .tab1, .tab2, .tab3, .tab4, .tab5, .tab6, .tab7, .tab8, .tab9])))
+        main.addItem(submenu(L("Onglets", "Tabs"), items([.nextTab, .previousTab, .tabList, nil, .split, .swapSides, .focusOtherSide, nil, .muteTab, .newFolder, nil, .tab1, .tab2, .tab3, .tab4, .tab5, .tab6, .tab7, .tab8, .tab9])))
         main.addItem(submenu(L("Espaces", "Spaces"), spacesMenu()))
         let window = NSMenu(title: L("Fenêtre", "Window"))
         window.addItem(withTitle: L("Réduire", "Minimize"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")

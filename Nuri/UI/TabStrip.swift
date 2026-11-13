@@ -18,10 +18,8 @@ struct TabStrip: View {
     private static let newTabRoom: CGFloat = 32
     /// Around and between the two tabs of a split.
     private static let blockInset: CGFloat = 2
-    /// From this many tabs in the bar, the one under the pointer widens.
-    static let growsFrom = 12
-    /// Slow and without any bounce: the whole bar moves with it, and it starts at every tab the pointer crosses.
-    private static let growth = Animation.smooth(duration: 0.75)
+    /// What the list's button takes at the end of a crowded bar.
+    private static let listRoom: CGFloat = 48
 
     private struct Entry: Identifiable {
         let tab: Tab
@@ -42,12 +40,15 @@ struct TabStrip: View {
                       let first = entries.first(where: { pair.contains($0.id) }) else { return nil }
                 return (left, right, first.id)
             }
-            // With many tabs, the one under the pointer widens for its title.
-            let grown = entries.count >= Self.growsFrom && browser.carry == nil
-                ? browser.expandedTabID.flatMap { id in entries.first { $0.id == id && $0.tab !== browser.selectedTab }?.tab } : nil
-            let widths = tabWidths(available: geometry.size.width - (pair == nil ? 0 : Self.blockInset * 2), count: entries.count,
-                                   grown: grown.map(TabChip.fittingWidth))
-            let width = { (tab: Tab) in tab === browser.selectedTab ? widths.active : (tab === grown ? widths.grown : widths.normal) }
+            let inset = pair == nil ? 0 : Self.blockInset * 2
+            // Down to their icons, the tabs no longer say what they are: the list of them all comes
+            // at the end of the bar. Decided on the whole width, so its own room can't undo it.
+            let crowded = Self.tabWidths(available: geometry.size.width - inset, count: entries.count, hasActive: browser.selectedTab != nil).normal < TabChip.titleFrom
+            let listed = crowded || browser.showingTabList
+            let room = geometry.size.width - (listed ? Self.listRoom : 0)
+            let widths = Self.tabWidths(available: room - inset, count: entries.count, hasActive: browser.selectedTab != nil)
+            let width = { (tab: Tab) in tab === browser.selectedTab ? widths.active : widths.normal }
+            HStack(spacing: 0) {
             ScrollViewReader { reader in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: Self.spacing) {
@@ -73,9 +74,8 @@ struct TabStrip: View {
                         newTabButton
                     }
                     .animation(Theme.spring, value: browser.selectedTab?.id)
-                    .animation(Self.growth, value: grown?.id)
                     // The whole width, past the last tab: all of it moves the window.
-                    .frame(minWidth: geometry.size.width, alignment: .leading)
+                    .frame(minWidth: room, alignment: .leading)
                     .frame(height: Metrics.topBarHeight)
                     .background(TitleBarDragArea())
                 }
@@ -85,6 +85,13 @@ struct TabStrip: View {
                 .onChange(of: browser.selectedTab?.id) { _, id in
                     if let id { withAnimation(Theme.quick) { reader.scrollTo(id) } }
                 }
+            }
+            // Always there, so its panel has where to open from when the shortcut asks for it.
+            TabListButton(tabs: entries.map(\.tab))
+                .frame(width: listed ? Self.listRoom : 0, alignment: .trailing)
+                .opacity(listed ? 1 : 0)
+                .allowsHitTesting(listed)
+                .accessibilityHidden(!listed)
             }
         }
         .frame(height: Metrics.topBarHeight)
@@ -98,26 +105,13 @@ struct TabStrip: View {
 
     /// The active tab carries the address, so it comes first: the others share what it leaves, down
     /// to their icon, and past that the row scrolls. When they all fit it takes the rest.
-    /// `grown`: what the tab under the pointer needs for its title. It takes it from the others (the
-    /// active tab keeps its width), which stay at least an icon wide: past that the row gets longer.
-    private func tabWidths(available: CGFloat, count: Int, grown: CGFloat?) -> (normal: CGFloat, active: CGFloat, grown: CGFloat) {
-        let room = max(0, available - Self.newTabRoom - CGFloat(max(0, count - 1)) * Self.spacing)
-        let hasActive = browser.selectedTab != nil
+    static func tabWidths(available: CGFloat, count: Int, hasActive: Bool) -> (normal: CGFloat, active: CGFloat) {
+        let room = max(0, available - newTabRoom - CGFloat(max(0, count - 1)) * spacing)
         let others = CGFloat(max(0, count - (hasActive ? 1 : 0)))
-        let normal: CGFloat, active: CGFloat
-        if hasActive {
-            let least = min(Self.minActive, room * 0.6)
-            normal = others > 0 ? max(Self.minWidth, min((room - least) / others, Self.maxWidth)) : Self.maxWidth
-            active = max(least, min(Self.maxActive, room - normal * others))
-        } else {
-            normal = max(Self.minWidth, min(room / max(1, others), Self.maxWidth))
-            active = 0
-        }
-        guard let grown, grown > normal, others > 1 else { return (normal, active, normal) }
-        // What the others had, the grown one taken out; never wider than they were.
-        let shared = room - active - grown
-        let rest = max(Self.minWidth, min(normal, shared / (others - 1)))
-        return (rest, active, grown)
+        guard hasActive else { return (max(minWidth, min(room / max(1, others), maxWidth)), 0) }
+        let least = min(minActive, room * 0.6)
+        let normal = others > 0 ? max(minWidth, min((room - least) / others, maxWidth)) : maxWidth
+        return (normal, max(least, min(maxActive, room - normal * others)))
     }
 }
 
@@ -148,45 +142,54 @@ struct TabChip: View {
                     .onEnded { browser.tabDragEnded(tab, translation: $0.translation) }
             )
             .contextMenu { TabMenu(tab: tab) }
-            // Widened, it already says its title (unless it is too long even then).
-            .help(selected ? L("\(tab.displayTitle) : rechercher ou saisir une adresse (⌘L)", "\(tab.displayTitle): search or enter an address (⌘L)")
-                  : (width >= Self.fittingWidth(tab) - 1 ? "" : tab.displayTitle))
+            // The others have their card (TabPreviewCard) when their title is cut.
+            .help(selected ? L("\(tab.displayTitle) : rechercher ou saisir une adresse (⌘L)", "\(tab.displayTitle): search or enter an address (⌘L)") : "")
             .accessibilityElement(children: .contain)
             .accessibilityLabel(tab.displayTitle)
             .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
     }
 
-    // MARK: Widened under the pointer
+    // MARK: Its card under the pointer
 
+    /// Narrower than this, a tab is its icon alone.
+    static let titleFrom: CGFloat = 62
     private static let titleFont = NSFont.systemFont(ofSize: 12)
-    private static let widestGrown: CGFloat = 260
-    /// Between two tabs, or one pulled from under the pointer as the others make room: the last one
-    /// stays wide this long, so the bar doesn't fold and unfold.
+    /// The card waits for the pointer to rest on a first tab; from one tab to the next it follows at once.
+    private static let previewDelay: Duration = .milliseconds(350)
+    /// Between two tabs the pointer is over none: the card stays this long, so it doesn't blink.
     private static let leaveDelay: Duration = .milliseconds(140)
 
     /// What its whole title needs: margins, icon, title, its buttons (close, sound, call).
     static func fittingWidth(_ tab: Tab) -> CGFloat {
         let title = ceil((tab.displayTitle as NSString).size(withAttributes: [.font: titleFont]).width)
         let buttons = 18 * CGFloat(1 + (tab.isAudible || tab.isMuted ? 1 : 0) + (tab.isInCall ? 1 : 0))
-        return min(widestGrown, 8 + 15 + 6 + title + 6 + 6 + buttons + 8)
+        return 8 + 15 + 6 + title + 6 + 6 + buttons + 8
     }
 
     private func pointerMoved(inside: Bool) {
         pointerInside = inside
+        let id = tab.id
         if inside {
-            if browser.carry == nil { browser.expandedTabID = tab.id }
-        } else if browser.expandedTabID == tab.id {
-            let id = tab.id
+            guard browser.carry == nil else { return }
+            if browser.previewTabID != nil {
+                browser.previewTabID = id
+            } else {
+                Task { @MainActor in
+                    try? await Task.sleep(for: Self.previewDelay)
+                    if pointerInside, browser.carry == nil { browser.previewTabID = id }
+                }
+            }
+        } else if browser.previewTabID == id {
             Task { @MainActor in
                 try? await Task.sleep(for: Self.leaveDelay)
-                if browser.expandedTabID == id, !pointerInside { browser.expandedTabID = nil }
+                if browser.previewTabID == id, !pointerInside { browser.previewTabID = nil }
             }
         }
     }
 
     @ViewBuilder
     private func chip(selected: Bool) -> some View {
-        let compact = width < 62 && !selected
+        let compact = width < Self.titleFrom && !selected
         HStack(spacing: 6) {
             TabIcon(tab: tab)
             if selected {
@@ -420,7 +423,7 @@ struct FolderChip: View {
                     .padding(8)
             }
             ForEach(folder.tabs) { tab in
-                FolderRow(tab: tab) {
+                TabRow(tab: tab) {
                     showingList = false
                     browser.select(tab)
                 }
@@ -471,8 +474,11 @@ struct FolderEditor: View {
     }
 }
 
-private struct FolderRow: View {
+/// A tab in a list (a folder's, the bar's): its title has the room the bar doesn't give it.
+struct TabRow: View {
     let tab: Tab
+    /// The one the keyboard is on, or the one on screen.
+    var lit = false
     let open: () -> Void
     @Environment(BrowserModel.self) private var browser
     @State private var hovering = false
@@ -492,11 +498,193 @@ private struct FolderRow: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 28)
-        .background(RoundedRectangle(cornerRadius: 7).fill(hovering ? Theme.control : .clear))
+        .background(RoundedRectangle(cornerRadius: 7).fill(hovering || lit ? Theme.control : .clear))
         .contentShape(Rectangle())
         .onTapGesture(perform: open)
         .onHover { hovering = $0 }
         .contextMenu { TabMenu(tab: tab) }
+    }
+}
+
+// MARK: - The card of the tab under the pointer
+
+extension BrowserModel {
+    /// The tab whose card is out: under the pointer, not the one on screen, and its title cut in the bar.
+    var previewedTab: Tab? {
+        guard carry == nil, commandBar == nil, let id = previewTabID, let frame = tabFrames[id],
+              let tab = currentSpace.allTabs.first(where: { $0.id == id }), tab !== selectedTab,
+              frame.width < TabChip.fittingWidth(tab) - 1 else { return nil }
+        return tab
+    }
+}
+
+/// With many tabs, their titles are cut or gone. The one under the pointer says its title and its
+/// site on a card under the bar: nothing moves in the bar itself.
+struct TabPreviewCard: View {
+    @Environment(BrowserModel.self) private var browser
+
+    static let width: CGFloat = 250
+    private static let margin: CGFloat = 8
+
+    /// Under its tab and centered on it, kept inside the window.
+    static func origin(under tab: CGRect, windowWidth: CGFloat) -> CGPoint {
+        CGPoint(x: max(margin, min(tab.midX - width / 2, windowWidth - width - margin)), y: tab.maxY + 5)
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            if let tab = browser.previewedTab, let frame = browser.tabFrames[tab.id] {
+                let origin = Self.origin(under: frame, windowWidth: geometry.size.width)
+                card(tab)
+                    .offset(x: origin.x, y: origin.y)
+                    .transition(.opacity)
+            }
+        }
+        .animation(Theme.quick, value: browser.previewedTab?.id)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func card(_ tab: Tab) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Metrics.controlRadius, style: .continuous)
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(tab.displayTitle)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(Theme.text)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            if let detail = Self.detail(tab) {
+                Text(detail)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(width: Self.width, alignment: .leading)
+        .background(shape.fill(Theme.card))
+        .overlay(shape.stroke(Theme.hairline))
+        .shadow(color: Theme.shadow, radius: 8, y: 3)
+    }
+
+    /// Its site, unless the title is already that, and whether it sleeps.
+    static func detail(_ tab: Tab) -> String? {
+        var parts: [String] = []
+        if !tab.addressText.isEmpty, tab.addressText != tab.displayTitle { parts.append(tab.addressText) }
+        if tab.isAsleep, tab.url != nil { parts.append(L("en veille", "asleep")) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - The list of the bar's tabs
+
+/// At the end of a crowded bar: how many tabs it holds, and the way to the list of them.
+struct TabListButton: View {
+    let tabs: [Tab]
+    @Environment(BrowserModel.self) private var browser
+    @Environment(\.chromeForeground) private var foreground
+    @State private var hovering = false
+
+    var body: some View {
+        @Bindable var browser = browser
+        let help = L("Tous les onglets", "All tabs") + (Shortcuts.shortcut(for: .tabList).map { " (\($0.display))" } ?? "")
+        Button { browser.showingTabList.toggle() } label: {
+            HStack(spacing: 3) {
+                Text("\(tabs.count)").font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+            }
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 7)
+            .frame(height: 28)
+            .fixedSize()
+            .background(RoundedRectangle(cornerRadius: Metrics.controlRadius, style: .continuous)
+                .fill(hovering || browser.showingTabList ? Theme.control : Theme.controlHover.opacity(0.5)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
+        .onHover { hovering = $0 }
+        .popover(isPresented: $browser.showingTabList, arrowEdge: .bottom) {
+            TabListPanel(tabs: tabs, close: { browser.showingTabList = false }).environment(browser)
+        }
+    }
+}
+
+/// Every tab of the bar with its title, and a field to narrow them down. Arrows and Return work
+/// from the field.
+struct TabListPanel: View {
+    let tabs: [Tab]
+    let close: () -> Void
+    @Environment(BrowserModel.self) private var browser
+    @State private var query = ""
+    @State private var highlighted: UUID?
+    @FocusState private var fieldFocused: Bool
+
+    private static let rowHeight: CGFloat = 29
+    private static let tallest: CGFloat = 420
+
+    /// The tabs whose title or address holds every word typed, whatever the case or the accents.
+    static func matches(_ tabs: [Tab], _ query: String) -> [Tab] {
+        let fold = { (text: String) in text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        let words = fold(query).split(separator: " ")
+        guard !words.isEmpty else { return tabs }
+        return tabs.filter { tab in
+            let text = fold(tab.displayTitle + " " + (tab.url?.absoluteString ?? ""))
+            return words.allSatisfy { text.contains($0) }
+        }
+    }
+
+    var body: some View {
+        let shown = Self.matches(tabs.filter { !$0.isClosed }, query)
+        let current = shown.first { $0.id == highlighted } ?? shown.first
+        VStack(alignment: .leading, spacing: 6) {
+            TextField(L("Filtrer les onglets", "Filter tabs"), text: $query)
+                .textFieldStyle(.roundedBorder)
+                .focused($fieldFocused)
+                .onSubmit { if let current { open(current) } }
+                .onKeyPress(.upArrow) { move(-1, in: shown, from: current); return .handled }
+                .onKeyPress(.downArrow) { move(1, in: shown, from: current); return .handled }
+            if shown.isEmpty {
+                Text(L("Aucun onglet ne correspond.", "No tab matches."))
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.secondaryText)
+                    .padding(8)
+            } else {
+                ScrollViewReader { reader in
+                    ScrollView {
+                        LazyVStack(spacing: 1) {
+                            ForEach(shown) { tab in
+                                TabRow(tab: tab, lit: tab === current) { open(tab) }.id(tab.id)
+                            }
+                        }
+                    }
+                    .frame(height: min(CGFloat(shown.count) * Self.rowHeight, Self.tallest))
+                    .onChange(of: highlighted) { _, id in if let id { reader.scrollTo(id) } }
+                    .onAppear { if let id = highlighted { reader.scrollTo(id, anchor: .center) } }
+                }
+            }
+        }
+        .padding(8)
+        .frame(width: 320)
+        .onAppear {
+            highlighted = browser.selectedTab?.id
+            fieldFocused = true
+        }
+        .onChange(of: query) { highlighted = Self.matches(tabs, query).first?.id }
+    }
+
+    private func move(_ step: Int, in shown: [Tab], from current: Tab?) {
+        guard !shown.isEmpty else { return }
+        let index = current.flatMap { tab in shown.firstIndex { $0 === tab } } ?? 0
+        highlighted = shown[(index + step + shown.count) % shown.count].id
+    }
+
+    private func open(_ tab: Tab) {
+        close()
+        browser.select(tab)
     }
 }
 
@@ -509,6 +697,7 @@ extension BrowserModel {
 
     /// Pointer moved with a tab pressed. Nothing happens under the threshold: it's still a click.
     func tabDragChanged(_ tab: Tab, location: CGPoint, translation: CGSize) {
+        if previewTabID != nil { previewTabID = nil }
         if carry == nil {
             guard hypot(translation.width, translation.height) >= Self.dragThreshold else { return }
             let frame = tabFrames[tab.id]
@@ -637,15 +826,15 @@ struct TabCarryGhost: View {
             let onBar = pointer.y <= BrowserModel.barBottom
             HStack(spacing: 6) {
                 TabIcon(tab: tab)
-                if carry.width >= 62 {
+                if carry.width >= TabChip.titleFrom {
                     Text(tab.displayTitle)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
                 }
             }
-            .padding(.horizontal, carry.width >= 62 ? 8 : 0)
-            .frame(width: carry.width, height: Metrics.tabHeight, alignment: carry.width >= 62 ? .leading : .center)
+            .padding(.horizontal, carry.width >= TabChip.titleFrom ? 8 : 0)
+            .frame(width: carry.width, height: Metrics.tabHeight, alignment: carry.width >= TabChip.titleFrom ? .leading : .center)
             .background(RoundedRectangle(cornerRadius: Metrics.controlRadius, style: .continuous).fill(Theme.card))
             .overlay(RoundedRectangle(cornerRadius: Metrics.controlRadius, style: .continuous).stroke(Theme.hairline))
             .shadow(color: Theme.shadow, radius: onBar ? 5 : 12, y: onBar ? 2 : 5)

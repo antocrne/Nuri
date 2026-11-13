@@ -158,7 +158,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         if AppSettings.shared.autoHideTopBar, !browser.isFullScreen {
             if point.y <= 5, !browser.topBarRevealed {
                 withAnimation(Theme.quick) { browser.topBarRevealed = true }
-            } else if browser.topBarRevealed, point.y > Metrics.topBarHeight + 24, browser.carry == nil, !browser.showingDownloads, !browser.showingBookmarks, !browser.editingBookmark {
+            } else if browser.topBarRevealed, point.y > Metrics.topBarHeight + 24, browser.carry == nil, !browser.showingDownloads, !browser.showingTabList, !browser.showingBookmarks, !browser.editingBookmark {
                 withAnimation(Theme.quick) { browser.topBarRevealed = false }
             }
         }
