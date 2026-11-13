@@ -1,8 +1,10 @@
-# Nuri's self-tests at each push and pull request, on a Mac runner (it has a window server, which
-# the tests need: they drive the real window).
+# Nuri's self-tests at each pull request and each push to main, on a Mac runner (it has a window
+# server, which the tests need: they drive the real window). Not on every branch push: a branch
+# with an open pull request would run twice.
 name: Auto-tests
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 jobs:
