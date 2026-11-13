@@ -44,6 +44,7 @@ private struct BrowserWindowContent: View {
                     }
                     .transition(.opacity)
             }
+            TabPreviewCard()
             CommandBarVeil()
             if let request = browser.commandBar {
                 CommandBarOverlay(request: request).id(request.id)

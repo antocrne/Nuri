@@ -110,12 +110,17 @@ final class BrowserModel {
     /// Self-tests only: who did what with a click, for a failure seen on one machine and not another.
     @ObservationIgnored var clickTrace: [String] = []
     func traceClick(_ what: @autoclosure () -> String) {
+        // The self-tests are in Debug builds only.
+        #if DEBUG
         guard SelfTestRunner.isRequested else { return }
         clickTrace.append(String(format: "%.3f ", Date().timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100)) + what())
         if clickTrace.count > 40 { clickTrace.removeFirst() }
+        #endif
     }
-    /// The tab under the pointer. With many tabs it widens in the bar, its neighbours making room.
-    var expandedTabID: UUID?
+    /// The tab the pointer rests on, whose card is out under the bar (TabPreviewCard).
+    var previewTabID: UUID?
+    /// The list of the bar's tabs, next to its button at the end of a crowded bar (⇧⌘A).
+    var showingTabList = false
     @ObservationIgnored let carryPointer = CarryPointer()
     /// Bumped to give the new tab page's field the focus.
     var newTabFieldFocus = 0

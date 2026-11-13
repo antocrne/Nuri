@@ -4013,7 +4013,7 @@ extension FeatureSelfTest {
         await feedbackWebPageNotDownloaded()
         await feedbackGeolocation()
         await feedbackInspectorLinks()
-        await feedbackWideTabs()
+        await feedbackManyTabs()
     }
 
     // YouTube's home page downloaded instead of shown.
@@ -4104,55 +4104,78 @@ extension FeatureSelfTest {
         if inspector.responds(to: close) { inspector.perform(close) }
     }
 
-    // Many tabs: the one under the pointer shown wide enough for its title.
-    private func feedbackWideTabs() async {
-        // A few past 12: narrow, but not yet down to their icon (then the others have room to give).
-        let titles = (1...13).map { "Onglet numéro \($0) avec un titre assez long" }
-        for title in titles {
+    // Many tabs: the one under the pointer says its title on a card, and the bar has a list of them all.
+    private func feedbackManyTabs() async {
+        let before = browser.currentSpace.tabs.count
+        for number in 1...8 {
             let tab = browser.openTab(url: nil, background: true)
-            tab.title = title
+            tab.title = "Onglet numéro \(number) avec un titre assez long"
         }
         browser.select(browser.currentSpace.tabs[0])
         await sleep(0.8)
-        let tabs = browser.currentSpace.tabs
-        guard tabs.count >= TabStrip.growsFrom, let narrow = tabs.dropFirst(3).first, let frame = browser.tabFrames[narrow.id] else {
-            check("Onglets larges : la barre est pleine", false); return
+        var tabs = browser.currentSpace.tabs
+        guard let cut = tabs.dropFirst(3).first, let frame = browser.tabFrames[cut.id], let width = browser.window?.contentView?.bounds.width else {
+            check("Onglets nombreux : la barre a ses onglets", false); return
         }
-        check("Onglets larges : nombreux, ils n'ont plus la place de leur titre", frame.width < 90, "\(frame.width)")
+        defer { browser.previewTabID = nil; browser.showingTabList = false }
         // Mouse events made here don't reach SwiftUI's hover: the tab under the pointer set as it does.
-        note("Onglets larges : le passage de la souris lui-même n'est pas simulé")
-        defer { browser.expandedTabID = nil }
-        let neighbour = tabs[4]
-        let neighbourBefore = browser.tabFrames[neighbour.id]?.width ?? 0
-        let activeBefore = browser.selectedTab.flatMap { browser.tabFrames[$0.id]?.width } ?? 0
-        browser.expandedTabID = narrow.id
-        await sleep(0.5)
-        let after = browser.tabFrames[narrow.id]
-        check("Onglets larges : survolé, il s'élargit dans la barre jusqu'à son titre",
-              after.map { $0.width >= TabChip.fittingWidth(narrow) - 1 && $0.width > frame.width + 40 } == true, "\(String(describing: after?.width))")
-        let neighbourAfter = browser.tabFrames[neighbour.id]?.width ?? 0
-        let activeAfter = browser.selectedTab.flatMap { browser.tabFrames[$0.id]?.width } ?? 0
-        check("Onglets larges : les autres se resserrent, l'onglet actif garde sa largeur",
-              neighbourAfter < neighbourBefore - 0.5 && abs(activeAfter - activeBefore) < 1, "\(neighbourBefore) → \(neighbourAfter), actif \(activeBefore) → \(activeAfter)")
-        // It grows from where it was: the pointer that was over it still is.
-        check("Onglets larges : il reste sous le pointeur", after.map { $0.minX <= frame.midX && $0.maxX >= frame.midX } == true)
-        await snapshot("onglet-agrandi")
-        browser.expandedTabID = nil
-        await sleep(0.5)
-        check("Onglets larges : le pointeur parti, tout reprend sa place",
-              browser.tabFrames[narrow.id].map { abs($0.width - frame.width) < 1 } == true)
-        // Below 12 tabs, nothing moves.
-        for tab in tabs.dropFirst(TabStrip.growsFrom - 1) where tab !== browser.selectedTab { browser.close(tab) }
-        await sleep(0.6)
-        let few = browser.currentSpace.tabs
-        if few.count < TabStrip.growsFrom, let some = few.first(where: { $0 !== browser.selectedTab }), let before = browser.tabFrames[some.id] {
-            browser.expandedTabID = some.id
-            await sleep(0.4)
-            check("Onglets larges : moins de 12 onglets, rien ne bouge", browser.tabFrames[some.id].map { abs($0.width - before.width) < 1 } == true)
-        } else {
-            check("Onglets larges : moins de 12 onglets", false, "\(few.count)")
+        note("Onglets nombreux : le passage de la souris lui-même n'est pas simulé")
+        check("Onglets nombreux : leur titre est coupé", frame.width < TabChip.fittingWidth(cut) - 1, "\(frame.width)")
+        let active = browser.selectedTab.flatMap { browser.tabFrames[$0.id] }
+        browser.previewTabID = cut.id
+        await sleep(0.4)
+        check("Onglets nombreux : survolé, l'onglet a sa carte", browser.previewedTab === cut)
+        check("Onglets nombreux : rien ne bouge dans la barre",
+              browser.tabFrames[cut.id] == frame && browser.selectedTab.flatMap { browser.tabFrames[$0.id] } == active)
+        let origin = TabPreviewCard.origin(under: frame, windowWidth: width)
+        check("Onglets nombreux : la carte est sous l'onglet, dans la fenêtre",
+              origin.y >= frame.maxY && origin.x >= 0 && origin.x + TabPreviewCard.width <= width && origin.x <= frame.midX && origin.x + TabPreviewCard.width >= frame.midX,
+              "\(origin) sous \(frame)")
+        let last = TabPreviewCard.origin(under: CGRect(x: width - 20, y: 8, width: 34, height: 30), windowWidth: width)
+        check("Onglets nombreux : au bord de la fenêtre, la carte reste dedans", last.x + TabPreviewCard.width <= width)
+        await snapshot("onglet-carte")
+        if let shown = browser.selectedTab {
+            browser.previewTabID = shown.id
+            check("Onglets nombreux : pas de carte pour l'onglet affiché, qui dit déjà tout", browser.previewedTab == nil)
         }
-        browser.expandedTabID = nil
+        browser.previewTabID = cut.id
+        browser.tabDragChanged(cut, location: CGPoint(x: frame.midX, y: frame.midY), translation: .zero)
+        check("Onglets nombreux : la carte s'en va dès qu'on appuie sur l'onglet", browser.previewTabID == nil && browser.carry == nil)
+
+        // The list comes when the tabs are down to their icons.
+        func crowded() -> Bool {
+            self.browser.currentSpace.tabs.filter { $0 !== self.browser.selectedTab }
+                .allSatisfy { (self.browser.tabFrames[$0.id]?.width ?? 0) < TabChip.titleFrom }
+        }
+        var added = 0
+        while !crowded(), added < 60 {
+            let tab = browser.openTab(url: nil, background: true)
+            tab.title = "Autre onglet \(added) à retrouver"
+            added += 1
+            if added % 6 == 0 { await sleep(0.5) }
+        }
+        await sleep(0.6)
+        tabs = browser.currentSpace.tabs
+        check("Onglets nombreux : assez d'onglets, ils n'ont plus que leur icône", crowded(), "\(tabs.count) onglets")
+        let named = browser.openTab(url: URL(string: "https://exemple-liste.example/éléphant"), background: true)
+        named.title = "Éléphant rose"
+        tabs = browser.currentSpace.tabs
+        check("Liste des onglets : sans rien taper, tous y sont", TabListPanel.matches(tabs, "  ").count == tabs.count)
+        check("Liste des onglets : filtrée par titre, sans tenir compte des accents ni de la casse",
+              TabListPanel.matches(tabs, "elephant ROSE").map(\.id) == [named.id])
+        check("Liste des onglets : filtrée par adresse", TabListPanel.matches(tabs, "exemple-liste").map(\.id) == [named.id])
+        check("Liste des onglets : rien ne correspond, rien n'est listé", TabListPanel.matches(tabs, "girafe bleue").isEmpty)
+        check("Liste des onglets : ⇧⌘A dans le menu Onglets",
+              NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items).contains { $0.title == NuriCommand.tabList.title && $0.keyEquivalent.lowercased() == "a" } == true)
+        NuriCommand.tabList.perform()
+        check("Liste des onglets : la commande l'ouvre", browser.showingTabList)
+        await snapshot("onglets-nombreux")
+        snapshot(panel: TabListPanel(tabs: tabs, close: {}), "liste-onglets")
+        browser.showingTabList = false
+        await sleep(0.4)
+        for tab in tabs.dropFirst(max(1, before)) where tab !== browser.selectedTab { browser.close(tab) }
+        browser.close(named)
+        await sleep(0.4)
     }
 }
 #endif
