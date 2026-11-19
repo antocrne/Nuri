@@ -13,7 +13,7 @@ import WebKit
 ///
 /// Never touches the user's session, history or downloads (see StateStore.directory). Mouse events
 /// are given to Nuri's own window: the real pointer doesn't move. Pages come from HTML strings and
-/// a small local server; `pip` and `bloqueur` also need the network.
+/// a small local server; `pip`, `bloqueur` and `cookies` also need the network.
 @MainActor
 enum SelfTestRunner {
     nonisolated static var isRequested: Bool { UserDefaults.standard.string(forKey: "NuriSelfTest") != nil }
@@ -78,6 +78,8 @@ final class FeatureSelfTest {
             ("telechargements", { await $0.testDownloads() }),
             ("pistage", { await $0.testTrackingParameters() }),
             ("permissions", { await $0.testSitePermissions() }),
+            ("pubs", { await $0.testPopunders() }),
+            ("cookies", { await $0.testCachedRedirectCookies() }),
             ("http", { await $0.testPlainHTTP() }),
             ("bloqueur", { await $0.testBlocker() }),
             ("langue", { await $0.testLanguage() }),
@@ -2305,6 +2307,172 @@ final class FeatureSelfTest {
         AppSettings.shared.stripTrackingParameters = false
         check("Pistage : désactivable", TrackingParameters.cleaned(dirty) == dirty)
         AppSettings.shared.stripTrackingParameters = saved
+    }
+
+    // MARK: Pop-unders and unrequested downloads
+
+    /// The scan site of 2026-11-18: an ad script opening another site's tab from any press of the
+    /// mouse, which then saved a file at once. `localhost` and `127.0.0.1` stand for two sites.
+    private func testPopunders() async {
+        check("Pubs : le site d'une adresse", PopupGuard.site("www.youtube.com") == "youtube.com" && PopupGuard.site("a.b.co.uk") == "b.co.uk"
+              && PopupGuard.site("ro.dogfootpalmo.cfd") == "dogfootpalmo.cfd" && PopupGuard.site("127.0.0.1") == "127.0.0.1" && PopupGuard.site("localhost") == "localhost")
+        let scans = URL(string: "https://kingofshojo.com/chapter-20/")!
+        let chapter = URL(string: "https://kingofshojo.com/chapter-21/")!
+        let ad = URL(string: "https://ro.dogfootpalmo.cfd/cx/abc?ref=kingofshojo.com")!
+        check("Pubs : un clic sur rien qui ouvre un autre site est une pub", PopupGuard.isPopunder(request: ad, opener: scans, clickedLink: nil, sized: false))
+        check("Pubs : un lien du site qui ouvre un autre site est une pub, même si elle nomme le site",
+              PopupGuard.isPopunder(request: ad, opener: scans, clickedLink: chapter, sized: false))
+        check("Pubs : le lien cliqué, ouvert en nouvel onglet, passe",
+              !PopupGuard.isPopunder(request: URL(string: "https://www.wikipedia.org/x"), opener: scans, clickedLink: URL(string: "https://wikipedia.org/x"), sized: false))
+        check("Pubs : un bouton qui ouvre un autre site passe (« Visiter le site »)",
+              !PopupGuard.isPopunder(request: ad, opener: scans, clickedLink: nil, pressedControl: true, sized: false))
+        check("Pubs : une fenêtre du site lui-même passe", !PopupGuard.isPopunder(request: chapter, opener: scans, clickedLink: nil, sized: false))
+        check("Pubs : une fenêtre de connexion ou de partage (avec une taille) passe",
+              !PopupGuard.isPopunder(request: URL(string: "https://accounts.google.com/o/oauth2/auth"), opener: scans, clickedLink: nil, sized: true))
+        check("Pubs : un lien sortant passé par un redirecteur passe",
+              !PopupGuard.isPopunder(request: URL(string: "https://go.redirector.com/?url=https%3A%2F%2Fshop.example%2Fitem"), opener: scans,
+                                     clickedLink: URL(string: "https://shop.example/item"), sized: false))
+        check("Pubs : une fenêtre vide est jugée à sa première page",
+              !PopupGuard.isPopunder(request: URL(string: "about:blank"), opener: scans, clickedLink: nil, sized: false)
+              && !PopupGuard.isPopunder(request: nil, opener: scans, clickedLink: nil, sized: false))
+        let zip = URL(string: "https://net.geo.opera.com/opera/stable/mac?utm_source=x")!
+        check("Pubs : le fichier d'un autre site dans une fenêtre de pub est demandé",
+              PopupGuard.isUnrequestedDownload(file: zip, page: ad, asked: true, fromPagePopup: true))
+        check("Pubs : le fichier d'un autre site sans clic est demandé",
+              PopupGuard.isUnrequestedDownload(file: zip, page: scans, asked: false, fromPagePopup: false))
+        check("Pubs : un fichier cliqué ou tapé part sans question", !PopupGuard.isUnrequestedDownload(file: zip, page: scans, asked: true, fromPagePopup: false))
+        check("Pubs : un fichier du site même part sans question",
+              !PopupGuard.isUnrequestedDownload(file: URL(string: "https://dl.kingofshojo.com/a.zip"), page: scans, asked: false, fromPagePopup: false))
+
+        guard let server = LocalServer() else { check("Pubs : serveur local", false); return }
+        _ = await until(2) { server.port != 0 }
+        let other = "http://127.0.0.1:\(server.port)"
+        PopupPermission.allowedSites.remove("localhost")
+        let html = """
+        <title>Pubs</title><body style='margin:0;height:3000px'>
+        <a id=own target=_blank href='\(other)/long?lien' style='position:fixed;left:0;top:0;width:300px;height:80px;background:#cfc;display:block'>lien</a>
+        <a id=chap href='/long?chapitre' style='position:fixed;left:0;top:120px;width:300px;height:80px;background:#ccf;display:block'>chapitre</a>
+        <div id=vide style='position:fixed;left:0;top:240px;width:300px;height:80px;background:#fcc'>vide</div>
+        <script>
+        window.mode = 'none';
+        document.addEventListener('pointerdown', (e) => {
+          if (mode === 'open') window.open('\(other)/long?pub', '_blank');
+          if (mode === 'blank') { const w = window.open('', '_blank'); setTimeout(() => { w.location = '\(other)/long?pub2'; }, 300); }
+          if (mode === 'hijack' && e.target.closest('#chap')) window.open('\(other)/long?pub3', '_blank');
+        }, true);
+        document.addEventListener('click', (e) => { if (e.target.closest('#chap')) e.preventDefault(); }, true);
+        </script>
+        """
+        let page = await htmlTab(html, base: "http://localhost:\(server.port)/")
+        browser.select(page)
+        browser.window?.makeFirstResponder(page.webView)
+        func setMode(_ mode: String) async {
+            _ = await page.webView?.nuriCall("window.mode = '\(mode)'; return 1;", world: .page)
+            page.request = nil
+        }
+        // The pointer brought over the element first: WebKit says then which link is under it.
+        func click(_ y: CGFloat) async {
+            let point = CGPoint(x: browser.pageFrame.minX + 50, y: browser.pageFrame.minY + y)
+            await mouse(.mouseMoved, at: point)
+            await sleep(0.2)
+            await mouse(.leftMouseDown, at: point)
+            await mouse(.leftMouseUp, at: point)
+        }
+        func blocked(_ query: String) -> Bool {
+            if case .popup(let url, _)? = page.request { return url?.absoluteString == "\(other)/long?\(query)" }
+            return false
+        }
+        let count = browser.currentSpace.tabs.count
+
+        await setMode("open")
+        await click(280)
+        _ = await until(3) { page.request != nil }
+        check("Pubs : un clic dans le vide n'ouvre pas l'autre site, et c'est dit", blocked("pub") && browser.currentSpace.tabs.count == count,
+              "\(String(describing: page.request)) · \(browser.currentSpace.tabs.count) onglets pour \(count)")
+
+        await setMode("hijack")
+        await click(160)
+        _ = await until(3) { page.request != nil }
+        check("Pubs : un lien du site détourné vers un autre n'ouvre rien", blocked("pub3") && browser.currentSpace.tabs.count == count,
+              "survolé \(page.hoveredLink?.absoluteString ?? "rien") · \(String(describing: page.request))")
+
+        await setMode("blank")
+        await click(280)
+        _ = await until(4) { page.request != nil }
+        let closed = await until(2) { browser.currentSpace.tabs.count == count }
+        check("Pubs : une fenêtre vide envoyée vers un autre site se referme, et c'est dit", blocked("pub2") && closed,
+              "\(String(describing: page.request)) · \(browser.currentSpace.tabs.count) onglets pour \(count)")
+
+        await setMode("none")
+        await click(40)
+        let opened = await until(3) { browser.currentSpace.tabs.count == count + 1 }
+        let linkTab = browser.currentSpace.tabs.first { $0.requestedURL?.absoluteString == "\(other)/long?lien" }
+        check("Pubs : le lien target=_blank cliqué s'ouvre, comme lien de l'utilisateur", opened && page.request == nil && linkTab?.openedFromClickedLink == true,
+              "\(browser.currentSpace.tabs.count) onglets pour \(count) · \(String(describing: page.request))")
+        if let linkTab { browser.close(linkTab) }
+        browser.select(page)
+
+        // A see-through link laid over the whole page: any click lands on it.
+        _ = await page.webView?.nuriCall("""
+            document.body.insertAdjacentHTML('beforeend', "<a id=voile target=_blank href='\(other)/long?voile' style='position:fixed;inset:0;opacity:0;display:block'></a>"); return 1;
+            """, world: .page)
+        await setMode("none")
+        await click(280)
+        _ = await until(3) { page.request != nil }
+        check("Pubs : un lien invisible posé sur la page n'ouvre rien", blocked("voile") && browser.currentSpace.tabs.count == count,
+              "\(String(describing: page.request)) · \(browser.currentSpace.tabs.count) onglets pour \(count)")
+        _ = await page.webView?.nuriCall("document.getElementById('voile').remove(); return 1;", world: .page)
+        page.request = nil
+
+        // Downloads: a page sending itself to another site's file, without a click (a timer longer
+        // than WebKit carries a click through). A page of the server: one written from a string has
+        // no history, and a tab whose download is refused is closed as empty.
+        browser.close(page)
+        // No click from here on: what follows doesn't depend on Nuri being in front.
+        eventsWereInFront = true
+        let served = browser.openTab(url: URL(string: "http://localhost:\(server.port)/long"))
+        await waitForLoad(served)
+        let manager = DownloadManager.shared
+        let before = manager.items.count
+        DownloadPermission.lastUnrequested = nil
+        DownloadPermission.unrequestedAnswerForTests = false
+        _ = await served.webView?.nuriCall("setTimeout(() => { location.href = '\(other)/file.bin'; }, 1500); return 1;", world: .page)
+        let asked = await until(6) { DownloadPermission.lastUnrequested != nil }
+        await sleep(0.5)
+        check("Pubs : le fichier d'un autre site sans clic est demandé, et refusé ne part pas",
+              asked && DownloadPermission.lastUnrequested?.page == "localhost" && manager.items.count == before && !served.isClosed,
+              "\(String(describing: DownloadPermission.lastUnrequested)) · \(manager.items.count) téléchargements pour \(before)")
+        DownloadPermission.lastUnrequested = nil
+        _ = await served.webView?.nuriCall("setTimeout(() => { location.href = '/file.bin'; }, 1500); return 1;", world: .page)
+        let sameSite = await until(6) { manager.items.count == before + 1 }
+        check("Pubs : le fichier du site même part sans question", sameSite && DownloadPermission.lastUnrequested == nil,
+              "\(manager.items.count) téléchargements pour \(before)")
+        if sameSite, let item = manager.items.first {
+            _ = await until(10) { item.state == .finished }
+            let file = item.destination
+            manager.clearFinished()
+            if let file { try? FileManager.default.removeItem(at: file) }
+        }
+    }
+
+    /// The network: youtube.com typed again and again (2026-11-19). Once WebKit keeps its redirect
+    /// to www.youtube.com in its cache, the request after it went out without cookies: the page
+    /// came signed out, in English, with its cookie banner. A PREF cookie asking for French tells.
+    private func testCachedRedirectCookies() async {
+        let store = browser.currentSpace.dataStore
+        guard let cookie = HTTPCookie(properties: [.domain: ".youtube.com", .path: "/", .name: "PREF", .value: "hl=fr&gl=FR",
+                                                   .secure: "TRUE", .expires: Date().addingTimeInterval(3600)]) else { return }
+        await store.httpCookieStore.setCookie(cookie)
+        var languages: [String] = []
+        for _ in 0..<4 {
+            let tab = browser.openTab(url: URL(string: "https://youtube.com/"))
+            await waitForLoad(tab, timeout: 25)
+            await sleep(1)
+            languages.append(await tab.webView?.nuriCall("return document.documentElement.lang;", world: .page, timeout: 5) as? String ?? "?")
+            browser.close(tab)
+        }
+        check("Cookies : youtube.com tapé quatre fois garde ses cookies, redirection du cache comprise",
+              languages.allSatisfy { $0.hasPrefix("fr") }, languages.joined(separator: ", "))
     }
 
     // MARK: Windows, printing, notifications

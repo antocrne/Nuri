@@ -10,7 +10,7 @@
 # NURI_SELFTEST_STRICT=1 also fails on tests that couldn't be verified (Nuri wasn't in front).
 set -e
 cd "$(dirname "$0")/.."
-SECTIONS="${1:-session,onglets,porter,glisser,liens,split,hublot,espaces,dossiers,adresse,menus,fermer,son,veille,prive,calcul,commandes,focus,lecture,historique,signets,telechargements,pistage,permissions,langue,raccourcis,barre,mise-a-jour,reunion,partage-son,apercu,import,audit}"
+SECTIONS="${1:-session,onglets,porter,glisser,liens,split,hublot,espaces,dossiers,adresse,menus,fermer,son,veille,prive,calcul,commandes,focus,lecture,historique,signets,telechargements,pistage,permissions,pubs,langue,raccourcis,barre,mise-a-jour,reunion,partage-son,apercu,import,audit}"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/nuri-selftest.XXXXXX")
 REPORT="${2:-$WORK/report.md}"
 # Outside ~/Documents: iCloud adds attributes that make code signing fail.

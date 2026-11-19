@@ -16,11 +16,44 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     // MARK: - Navigation policy
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
+        // Who asked for this page: a redirect keeps the answer of the navigation it continues.
+        if isMainFrame, !WebKitSPI.isRedirect(navigationAction) {
+            mainFrameNavigationAsked = Self.isAsked(navigationAction, in: webView)
+        }
         if navigationAction.shouldPerformDownload {
-            return await mayDownload(navigationAction.request.url, in: webView) ? .download : .cancel
+            let asked = isMainFrame ? mainFrameNavigationAsked : Self.isAsked(navigationAction, in: webView)
+            return await mayDownload(navigationAction.request.url, asked: asked, in: webView) ? .download : .cancel
         }
         guard let url = navigationAction.request.url else { return .allow }
         let scheme = url.scheme?.lowercased() ?? ""
+
+        // A WebKit bug (seen 2026-11-19 with "youtube.com" typed in a new tab): when a redirect
+        // comes from the disk cache (youtube.com → www.youtube.com), WebKit makes the next request
+        // without cookies. The site then sees a stranger: signed out, its cookie banner again. The
+        // same request, with cookies, goes out instead.
+        if isMainFrame, !navigationAction.request.httpShouldHandleCookies, scheme == "http" || scheme == "https",
+           (navigationAction.request.httpMethod ?? "GET").uppercased() == "GET", mayRetryWithCookies() {
+            Log.web.error("Redirection du cache sans cookies : page redemandée avec ses cookies")
+            var request = navigationAction.request
+            request.httpShouldHandleCookies = true
+            webView.load(request)
+            // Asked for as much as the navigation it replaces, no more: a page sending itself to a
+            // file doesn't become a typed address.
+            if !mainFrameNavigationAsked { _ = (webView as? NuriWebView)?.consumeAppLoad() }
+            return .cancel
+        }
+
+        // A blank window a page opened after a click, now sent somewhere: an ad's, if that's
+        // another site than the click was for (PopupGuard).
+        if isMainFrame, let check = tab?.blankPopupCheck, scheme == "http" || scheme == "https" {
+            tab?.blankPopupCheck = nil
+            if PopupGuard.isPopunder(request: url, opener: check.openerURL, clickedLink: check.clickedLink, pressedControl: check.pressedControl, sized: false) {
+                refusePopup(url, from: check.opener, openerURL: check.openerURL)
+                if let tab { DispatchQueue.main.async { [weak self] in self?.browser.close(tab) } }
+                return .cancel
+            }
+        }
 
         // An extension's page leading to the web: its web view can't go there (see Tab.load).
         if Extensions.isExtensionPage(webView.url), !Extensions.isExtensionPage(url), navigationAction.targetFrame?.isMainFrame == true,
@@ -85,6 +118,30 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// `WKNavigationAction.buttonNumber` is a mask: 1 the left button, 2 the right one, 4 the middle one.
     private static let middleButton = 4
 
+    /// Whether the user asked for the page the main frame is going to: a click, a typed address, a
+    /// reload. A page sending itself somewhere (a timer, a script of an ad) did not.
+    private var mainFrameNavigationAsked = true
+
+    /// A click, as WebKit tells it (a script's own `a.click()` or form submission isn't one), going
+    /// back or forward, a reload, or a load Nuri made. Only the main frame's navigation can be
+    /// Nuri's: a frame's never takes that mark from it.
+    private static func isAsked(_ action: WKNavigationAction, in webView: WKWebView) -> Bool {
+        // Without WebKit's word on clicks: as before, every download goes ahead.
+        guard WebKitSPI.knowsUserInitiated else { return true }
+        if WebKitSPI.isUserInitiated(action) { return true }
+        if [.backForward, .reload].contains(action.navigationType) { return true }
+        return action.targetFrame?.isMainFrame == true && (webView as? NuriWebView)?.consumeAppLoad() == true
+    }
+
+    /// Three tries in ten seconds: a page always redirected without cookies can't loop.
+    private var cookieRetries: [Date] = []
+    private func mayRetryWithCookies() -> Bool {
+        cookieRetries.removeAll { $0.timeIntervalSinceNow < -10 }
+        guard cookieRetries.count < 3 else { return false }
+        cookieRetries.append(Date())
+        return true
+    }
+
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         // "attachment" in any frame: Google Drive and others download through a hidden frame,
         // where a PDF or an image would otherwise be shown to nobody.
@@ -118,7 +175,10 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
             tab?.insecurePage = response.url
             return .cancel
         }
-        return await mayDownload(response.url, file: response.suggestedFilename, in: webView) ? .download : .cancel
+        // A frame's own navigation isn't followed: a press of the mouse or a key in the page just
+        // before stands for its click (a hidden frame fetching the file of a button).
+        let asked = navigationResponse.isForMainFrame ? mainFrameNavigationAsked : (webView as? NuriWebView)?.hadRecentInput() ?? true
+        return await mayDownload(response.url, file: response.suggestedFilename, asked: asked, in: webView) ? .download : .cancel
     }
 
     private func isAttachment(_ response: URLResponse) -> Bool {
@@ -148,11 +208,29 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     /// Asked only of a site saving several files in a row (DownloadPermission). The site is the page's; a tab opened just for the
     /// file has none yet, then it's the file's. A refused download leaves no empty tab behind.
-    private func mayDownload(_ url: URL?, file: String? = nil, in webView: WKWebView) async -> Bool {
+    private func mayDownload(_ url: URL?, file: String? = nil, asked: Bool, in webView: WKWebView) async -> Bool {
         // A tab opened for the file has no page yet: the site is the one that opened it.
         let opener = webView.backForwardList.currentItem == nil ? tab?.openerHost : nil
         let host = (opener ?? webView.url?.host() ?? url?.host() ?? "").nuriNormalizedHost
         let file = file ?? url?.lastPathComponent
+
+        // A file of another site that nobody asked for: an ad's window, or a page sending itself
+        // there without a click. Asked each time, never remembered. The page is the one shown
+        // (webView.url already says where the file comes from).
+        let page = webView.backForwardList.currentItem?.url ?? opener.flatMap { URL(string: "https://\($0)") } ?? tab?.url
+        let fromPagePopup = tab.map { $0.openedByPage && !$0.openedFromClickedLink } ?? false
+        if PopupGuard.isUnrequestedDownload(file: url, page: page, asked: asked, fromPagePopup: fromPagePopup) {
+            let pageHost = (page?.host() ?? host).nuriNormalizedHost
+            Log.downloads.error("Téléchargement non demandé depuis \(pageHost, privacy: .public) : question posée")
+            let allowed = await DownloadPermission.confirmUnrequested(file: file, from: url, page: pageHost, in: browser, window: webView.window)
+            if !allowed {
+                browser.showToast("arrow.down.circle", L("Téléchargement non demandé refusé", "Unrequested download refused"))
+                // The ad's tab goes with its file.
+                if fromPagePopup, let tab { browser.close(tab) } else { closeIfEmpty(webView) }
+            }
+            return allowed
+        }
+
         let allowed = await DownloadPermission.request(host, file: file, in: browser, window: webView.window)
         if !allowed {
             browser.showToast("arrow.down.circle", L("Téléchargement refusé depuis \(host)", "Download refused from \(host)"))
@@ -347,18 +425,27 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         // ⌘-click or middle click on a target=_blank link: behind, like any other link. The
         // context menu's "Ouvrir … dans un nouvel onglet" too: the page stays on screen.
         let fromContextMenu = (webView as? NuriWebView)?.consumeContextMenuOpen() == true
+        let host = webView.url?.host()?.nuriNormalizedHost ?? ""
+        let allowedSite = PopupPermission.isAllowed(host, in: browser)
+        let request = navigationAction.request.url
         // Not asked for by a click: refused, and said (a frame of another site, an ad most of the
         // time, isn't worth a word).
         if !fromContextMenu, WebKitSPI.knowsUserInitiated, !WebKitSPI.isUserInitiated(navigationAction),
            navigationAction.navigationType != .linkActivated {
-            let host = webView.url?.host()?.nuriNormalizedHost ?? ""
-            guard PopupPermission.isAllowed(host, in: browser) else {
-                if navigationAction.sourceFrame.isMainFrame, let tab, tab.request == nil, !host.isEmpty {
-                    let url = navigationAction.request.url.flatMap { ["http", "https"].contains($0.scheme?.lowercased() ?? "") ? $0 : nil }
-                    tab.request = .popup(url: url, host: host)
-                }
+            guard allowedSite else {
+                if navigationAction.sourceFrame.isMainFrame { refusePopup(request, from: tab, openerURL: webView.url) }
                 return nil
             }
+        }
+        // ⌘-click, middle click, the context menu: the user's own new tab.
+        let byHand = fromContextMenu || flags.contains(.command) || flags.contains(.option) || navigationAction.buttonNumber == Self.middleButton
+        // After a press of the mouse: a pop-under, unless the window is what was pressed (PopupGuard).
+        let press = byHand || allowedSite ? nil : (webView as? NuriWebView)?.recentPointerDown()
+        let sized = windowFeatures.width != nil || windowFeatures.height != nil
+        if let press, PopupGuard.isPopunder(request: request, opener: webView.url, clickedLink: press.link, pressedControl: press.control, sized: sized) {
+            Log.web.error("Fenêtre publicitaire après un clic bloquée (\(PopupGuard.site(of: request) ?? "?", privacy: .public))")
+            if navigationAction.sourceFrame.isMainFrame { refusePopup(request, from: tab, openerURL: webView.url) }
+            return nil
         }
         // ⌥-click on a target=_blank link: a glance, as for any other link.
         if flags.contains(.option), let url = navigationAction.request.url, !fromContextMenu,
@@ -372,7 +459,25 @@ final class TabWebDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         // Not its address yet: until a page commits, the opener can write in this tab whatever it wants.
         newTab.requestedURL = navigationAction.request.url
         newTab.openerHost = webView.url?.host()
+        if byHand {
+            newTab.openedFromClickedLink = true
+        } else if let press {
+            // The link pressed, opened in a new tab (target=_blank): its file downloads as any link's.
+            newTab.openedFromClickedLink = press.link != nil && PopupGuard.sameSite(request, press.link)
+            // A blank window, sent somewhere later: judged then.
+            if PopupGuard.site(of: request) == nil, !sized {
+                newTab.blankPopupCheck = BlankPopupCheck(opener: tab, openerURL: webView.url, clickedLink: press.link, pressedControl: press.control)
+            }
+        }
         return newTab.ensureWebView()
+    }
+
+    /// A window refused: said over the page that asked, with where it would have gone.
+    private func refusePopup(_ request: URL?, from opener: Tab?, openerURL: URL?) {
+        let host = openerURL?.host()?.nuriNormalizedHost ?? ""
+        guard let opener, opener.request == nil, !host.isEmpty else { return }
+        let url = request.flatMap { ["http", "https"].contains($0.scheme?.lowercased() ?? "") ? $0 : nil }
+        opener.request = .popup(url: url, host: host)
     }
 
     func webViewDidClose(_ webView: WKWebView) {

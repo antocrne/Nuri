@@ -18,6 +18,9 @@ final class ScriptMessageRouter: NSObject, WKScriptMessageHandler {
                 if body["type"] as? String == "input" {
                     tab.hasUserInput = true
                     tab.typedFrame = message.frameInfo
+                } else if body["type"] as? String == "press" {
+                    webView.notePagePress((body["link"] as? String).flatMap { $0.isEmpty ? nil : URL(string: $0) },
+                                          control: body["control"] as? Bool == true)
                 } else if body["type"] as? String == "notification" {
                     WebNotifications.shared.show(body, from: message.frameInfo, tab: tab)
                 }

@@ -662,6 +662,38 @@ enum DownloadPermission {
         defer { asking[host] = nil }
         return await task.value
     }
+
+    #if DEBUG
+    /// Self-test: what the last unrequested download asked about (page, file), and its answer.
+    static var lastUnrequested: (page: String, file: String?)?
+    static var unrequestedAnswerForTests = false
+    #endif
+
+    /// A file of another site the user didn't ask for (PopupGuard.isUnrequestedDownload): asked
+    /// every time, never remembered, "Don't Download" first. `page`: the site it comes from.
+    static func confirmUnrequested(file: String?, from source: URL?, page: String, in browser: BrowserModel, window: NSWindow?) async -> Bool {
+        #if DEBUG
+        if SelfTestRunner.isRequested {
+            lastUnrequested = (page, file)
+            return unrequestedAnswerForTests
+        }
+        #endif
+        guard let window = window ?? browser.window else { return false }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L("Télécharger un fichier que vous n'avez pas demandé ?", "Download a file you didn't ask for?")
+        let name = file.map { "« \($0) »" } ?? L("un fichier", "a file")
+        let origin = source?.host()?.nuriNormalizedHost
+        let what = origin.map { L("\(page) veut enregistrer \(name), venu de \($0).", "\(page) wants to save \(name), from \($0).") }
+            ?? L("\(page) veut enregistrer \(name).", "\(page) wants to save \(name).")
+        alert.informativeText = what + " " + L("Ni un clic ni une adresse tapée ne l'a demandé : c'est souvent une publicité.",
+                                               "Neither a click nor a typed address asked for it: it's often an ad.")
+        alert.addButton(withTitle: L("Ne pas télécharger", "Don't Download"))
+        alert.addButton(withTitle: L("Télécharger", "Download"))
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { continuation.resume(returning: $0 == .alertSecondButtonReturn) }
+        }
+    }
 }
 
 @MainActor
