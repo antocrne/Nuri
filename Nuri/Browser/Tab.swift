@@ -88,6 +88,12 @@ final class Tab: Identifiable {
     /// Site of the page that opened this tab: a tab opened just to fetch a file asks for the
     /// download permission of that site, not of the file's server.
     @ObservationIgnored var openerHost: String?
+    /// Opened by a page for the very link the user pressed (target=_blank): the user's own tab, whose
+    /// file downloads as any link's (see PopupGuard).
+    @ObservationIgnored var openedFromClickedLink = false
+    /// A blank window a page opened after a click: its first page is judged as a pop-under's would
+    /// be, since that is where the ad sends it.
+    @ObservationIgnored var blankPopupCheck: BlankPopupCheck?
     /// Back/forward list saved by a sleep, restored at wake-up.
     @ObservationIgnored private var savedInteractionState: Any?
     /// Scroll position read just before an automatic sleep, put back after the wake-up load

@@ -19,6 +19,7 @@ final class NuriWebView: WKWebView {
     /// plays the "impossible action" sound. Menu shortcuts are matched before this point, so the
     /// re-sent event is simply dropped; ⌘ combinations nothing handles keep the system's answer.
     override func keyDown(with event: NSEvent) {
+        lastKeyDown = Date()
         if sentKeyDowns.contains(event) {
             sentKeyDowns.remove(event)
             if !event.modifierFlags.contains(.command) { return }
@@ -36,8 +37,81 @@ final class NuriWebView: WKWebView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        MainActor.assumeIsolated { focusSplitSide() }
+        MainActor.assumeIsolated {
+            notePointerDown()
+            focusSplitSide()
+        }
         super.mouseDown(with: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        MainActor.assumeIsolated { notePointerDown() }
+        super.rightMouseDown(with: event)
+    }
+
+    // MARK: What the user did last (PopupGuard)
+
+    /// The last press of the mouse in the page, with the link under the pointer then (WebKit's own
+    /// hit test, as shown at the bottom of the page). Noted before the page hears of the press: an ad
+    /// opens its window from that very event.
+    private(set) var lastPointerDown: Press?
+
+    /// A press of the mouse in the page: when, the link pressed, or else whether it was a button.
+    struct Press {
+        let date: Date
+        let link: URL?
+        var control = false
+    }
+
+    @MainActor
+    private func notePointerDown() {
+        lastPointerDown = Press(date: Date(), link: tab?.hoveredLink)
+    }
+
+    /// The page's own word on that press (activity.js): the link pressed, read in the page itself.
+    /// It replaces the pointer's, which can be missing (no move since the page scrolled or loaded)
+    /// or late; when it comes after the window, the pointer's is what was judged.
+    func notePagePress(_ link: URL?, control: Bool) {
+        lastPointerDown = Press(date: Date(), link: link, control: control)
+    }
+
+    /// The press of the mouse a window a page opens now answers, if recent enough to be its cause
+    /// (WebKit lets a page open windows up to a few seconds after a click).
+    func recentPointerDown(within seconds: TimeInterval = 5) -> Press? {
+        guard let last = lastPointerDown, Date().timeIntervalSince(last.date) < seconds else { return nil }
+        return last
+    }
+
+    private var lastKeyDown: Date?
+
+    /// A press of the mouse or of a key in the page a moment ago: what a frame's download answers
+    /// when the user clicked its button.
+    func hadRecentInput(within seconds: TimeInterval = 5) -> Bool {
+        recentPointerDown(within: seconds) != nil || lastKeyDown.map { Date().timeIntervalSince($0) < seconds } == true
+    }
+
+    /// A load asked by Nuri (an address typed, a bookmark, a tab woken up): WebKit says it wasn't
+    /// a click, but the user asked for it all the same.
+    private var appLoadDate: Date?
+
+    @discardableResult
+    override func load(_ request: URLRequest) -> WKNavigation? {
+        appLoadDate = Date()
+        return super.load(request)
+    }
+
+    @discardableResult
+    override func loadFileURL(_ URL: URL, allowingReadAccessTo readAccessURL: URL) -> WKNavigation? {
+        appLoadDate = Date()
+        return super.loadFileURL(URL, allowingReadAccessTo: readAccessURL)
+    }
+
+    /// True once for the navigation that follows a load asked by Nuri (at once: one that never
+    /// came, cancelled before, doesn't lend its mark to a page's later navigation).
+    func consumeAppLoad() -> Bool {
+        defer { appLoadDate = nil }
+        guard let date = appLoadDate else { return false }
+        return Date().timeIntervalSince(date) < 3
     }
 
     /// The mouse's side buttons: the one at the back (3) goes back, the one in front (4) forward,

@@ -49,6 +49,11 @@ enum WebKitSPI {
         boolValue(action, "_isUserInitiated")
     }
 
+    /// A server's redirect of a navigation already decided: it keeps that navigation's origin.
+    static func isRedirect(_ action: WKNavigationAction) -> Bool {
+        boolValue(action, "_isRedirect")
+    }
+
     // MARK: Web Inspector
 
     static func showInspector(_ webView: WKWebView, console: Bool) {

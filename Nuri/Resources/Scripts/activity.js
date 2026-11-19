@@ -36,6 +36,28 @@
     try { post(Object.assign(JSON.parse(event.detail), { type: 'notification' })); } catch (_) {}
   });
 
+  // A press of the mouse, with the link pressed (or none): a window the page opens from it is
+  // judged by that (PopupGuard). Heard before the page's own listeners, which come after this
+  // script: an ad opening its window from this very press finds it already said.
+  addEventListener('pointerdown', (event) => {
+    if (!event.isTrusted) return;
+    const path = event.composedPath ? event.composedPath() : [];
+    let link = path.find((node) => node && (node.tagName === 'A' || node.tagName === 'AREA') && node.href);
+    // A link laid over the page to catch any click (see-through, or covering most of the window)
+    // is no link the user chose: an ad's.
+    if (link && link.tagName === 'A') {
+      const box = link.getBoundingClientRect();
+      const style = getComputedStyle(link);
+      const covering = box.width * box.height > 0.5 * innerWidth * innerHeight;
+      if (covering || Number(style.opacity) < 0.05 || style.visibility === 'hidden') link = null;
+    }
+    // A button (or what says it is one): made to be pressed, unlike text, a picture or a blank area.
+    const control = !link && path.some((node) => node && node.nodeType === 1 && (node.tagName === 'BUTTON'
+      || (node.tagName === 'INPUT' && /^(button|submit|image)$/i.test(node.type || ''))
+      || /^(button|menuitem|link)$/i.test(node.getAttribute('role') || '')));
+    post({ type: 'press', link: link ? String(link.href) : '', control });
+  }, true);
+
   const nonText = /^(checkbox|radio|range|color|file|submit|button|reset|image|hidden)$/i;
   let typed = false;
   addEventListener('input', (event) => {
